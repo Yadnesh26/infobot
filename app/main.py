@@ -7,7 +7,7 @@ from fastapi.responses import PlainTextResponse
 from app.config import settings
 from app.db import cache as db_cache
 from app.db import submissions as db_submissions
-from app.pipeline.normalize import normalize_image
+from app.pipeline.normalize import AudioTooLongError, extract_audio_track, normalize_audio, normalize_image
 from app.pipeline.orchestrator import run_text_pipeline
 from app.util import hash_phone
 from app.whatsapp.client import download_media, mark_read, send_text_reply
@@ -117,12 +117,8 @@ async def _compose_reply(msg: InboundMessage) -> tuple[str, dict | None, str | N
         return await _compose_image_reply(msg)
 
     if msg.type in ("audio", "video"):
-        extra = f" Caption: \"{msg.caption}\"" if msg.caption else ""
-        return (
-            f"Got your {msg.type}.{extra} (Audio/video verification not wired up yet.)",
-            None,
-            None,
-        )
+        return await _compose_audio_or_video_reply(msg)
+
     return "Got your message, but I couldn't find any text to check.", None, None
 
 
@@ -148,4 +144,55 @@ async def _compose_image_reply(msg: InboundMessage) -> tuple[str, dict | None, s
         )
 
     result = await run_text_pipeline(extracted_text, msg.frequently_forwarded)
+    return result.reply_text, result.pending_claim_write, result.cache_hit
+
+
+async def _compose_audio_or_video_reply(msg: InboundMessage) -> tuple[str, dict | None, str | None]:
+    if not msg.media_id:
+        return f"Got your {msg.type}, but there was no attachment to download.", None, None
+
+    try:
+        media_bytes = await download_media(msg.media_id)
+    except Exception:
+        logger.exception("Failed to download %s for wamid=%s", msg.type, msg.wamid)
+        return f"I couldn't download that {msg.type} -- could you try resending it?", None, None
+
+    if msg.type == "video":
+        try:
+            audio_bytes = await extract_audio_track(media_bytes, msg.media_mime_type)
+        except Exception:
+            logger.exception("Failed to extract audio from video for wamid=%s", msg.wamid)
+            return "I couldn't process the audio in that video -- could you try resending it?", None, None
+        audio_mime_type = "audio/wav"
+    else:
+        audio_bytes = media_bytes
+        audio_mime_type = msg.media_mime_type
+
+    try:
+        transcript = await normalize_audio(audio_bytes, audio_mime_type)
+    except AudioTooLongError as exc:
+        minutes = settings.MAX_AUDIO_SECONDS // 60
+        logger.info(
+            "Rejecting %s from wamid=%s: %.0fs exceeds cap", msg.type, msg.wamid, exc.duration_seconds
+        )
+        return (
+            f"That {msg.type} is too long to check (over {minutes} minutes). "
+            "Please trim it or send a shorter clip.",
+            None,
+            None,
+        )
+
+    if transcript is None:
+        return (
+            f"I couldn't transcribe that {msg.type} -- could you try resending it, "
+            "or send the text of the claim instead?",
+            None,
+            None,
+        )
+
+    combined = transcript
+    if msg.caption and msg.caption.strip():
+        combined = f"{transcript}\n{msg.caption.strip()}"
+
+    result = await run_text_pipeline(combined, msg.frequently_forwarded)
     return result.reply_text, result.pending_claim_write, result.cache_hit

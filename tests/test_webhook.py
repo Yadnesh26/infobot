@@ -7,7 +7,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.config import settings
-from app.main import _compose_image_reply, app
+from app.main import _compose_audio_or_video_reply, _compose_image_reply, app
+from app.pipeline.normalize import AudioTooLongError
 from app.whatsapp.parser import InboundMessage, extract_messages
 
 settings.WA_APP_SECRET = "test-secret"
@@ -222,4 +223,108 @@ async def test_compose_image_reply_handles_download_failure(monkeypatch):
     )
     reply_text, pending_write, cache_hit = await _compose_image_reply(msg)
     assert "couldn't download" in reply_text
+    assert pending_write is None
+
+
+@pytest.mark.anyio
+async def test_compose_audio_reply_runs_transcript_through_text_pipeline(monkeypatch):
+    from app.pipeline.orchestrator import PipelineResult
+
+    async def fake_download_media(media_id):
+        return b"fake-audio-bytes"
+
+    async def fake_normalize_audio(audio_bytes, mime_type):
+        assert audio_bytes == b"fake-audio-bytes"
+        assert mime_type == "audio/ogg"
+        return "hot water cures covid"
+
+    async def fake_run_text_pipeline(raw_text, frequently_forwarded):
+        assert raw_text == "hot water cures covid"
+        return PipelineResult("AUDIO VERDICT REPLY")
+
+    monkeypatch.setattr("app.main.download_media", fake_download_media)
+    monkeypatch.setattr("app.main.normalize_audio", fake_normalize_audio)
+    monkeypatch.setattr("app.main.run_text_pipeline", fake_run_text_pipeline)
+
+    msg = InboundMessage(
+        wamid="wamid.AUD1", sender="919876543210", type="audio",
+        media_id="media456", media_mime_type="audio/ogg", caption=None,
+    )
+    reply_text, pending_write, cache_hit = await _compose_audio_or_video_reply(msg)
+    assert reply_text == "AUDIO VERDICT REPLY"
+
+
+@pytest.mark.anyio
+async def test_compose_video_reply_extracts_audio_track_first(monkeypatch):
+    from app.pipeline.orchestrator import PipelineResult
+
+    calls = {}
+
+    async def fake_download_media(media_id):
+        return b"fake-video-bytes"
+
+    async def fake_extract_audio_track(video_bytes, mime_type):
+        calls["extracted"] = True
+        assert video_bytes == b"fake-video-bytes"
+        return b"fake-extracted-audio"
+
+    async def fake_normalize_audio(audio_bytes, mime_type):
+        assert audio_bytes == b"fake-extracted-audio"
+        assert mime_type == "audio/wav"
+        return "some transcribed claim"
+
+    async def fake_run_text_pipeline(raw_text, frequently_forwarded):
+        return PipelineResult("VIDEO VERDICT REPLY")
+
+    monkeypatch.setattr("app.main.download_media", fake_download_media)
+    monkeypatch.setattr("app.main.extract_audio_track", fake_extract_audio_track)
+    monkeypatch.setattr("app.main.normalize_audio", fake_normalize_audio)
+    monkeypatch.setattr("app.main.run_text_pipeline", fake_run_text_pipeline)
+
+    msg = InboundMessage(
+        wamid="wamid.VID1", sender="919876543210", type="video",
+        media_id="media789", media_mime_type="video/mp4", caption=None,
+    )
+    reply_text, pending_write, cache_hit = await _compose_audio_or_video_reply(msg)
+    assert calls.get("extracted") is True
+    assert reply_text == "VIDEO VERDICT REPLY"
+
+
+@pytest.mark.anyio
+async def test_compose_audio_reply_rejects_over_duration_cap(monkeypatch):
+    async def fake_download_media(media_id):
+        return b"fake-audio-bytes"
+
+    async def fake_normalize_audio(audio_bytes, mime_type):
+        raise AudioTooLongError(999)
+
+    monkeypatch.setattr("app.main.download_media", fake_download_media)
+    monkeypatch.setattr("app.main.normalize_audio", fake_normalize_audio)
+
+    msg = InboundMessage(
+        wamid="wamid.AUD2", sender="919876543210", type="audio",
+        media_id="media456", media_mime_type="audio/ogg", caption=None,
+    )
+    reply_text, pending_write, cache_hit = await _compose_audio_or_video_reply(msg)
+    assert "too long" in reply_text
+    assert pending_write is None
+
+
+@pytest.mark.anyio
+async def test_compose_audio_reply_graceful_when_transcription_fails(monkeypatch):
+    async def fake_download_media(media_id):
+        return b"fake-audio-bytes"
+
+    async def fake_normalize_audio(audio_bytes, mime_type):
+        return None
+
+    monkeypatch.setattr("app.main.download_media", fake_download_media)
+    monkeypatch.setattr("app.main.normalize_audio", fake_normalize_audio)
+
+    msg = InboundMessage(
+        wamid="wamid.AUD3", sender="919876543210", type="audio",
+        media_id="media456", media_mime_type="audio/ogg", caption=None,
+    )
+    reply_text, pending_write, cache_hit = await _compose_audio_or_video_reply(msg)
+    assert "couldn't transcribe" in reply_text
     assert pending_write is None

@@ -387,7 +387,9 @@ Once you have `raw_text` (OCR'd text plus caption, joined), hand it straight to 
 3. On error, timeout, empty result, or free/paid quota exhausted → fall back to Whisper (API or self-hosted).
 4. On both failing → reply honestly that the audio couldn't be processed.
 
-Cap duration (e.g. 3 minutes) — this also caps per-message ElevenLabs cost, not just latency. A 40-minute forwarded audio file is a cost and latency problem with no upside.
+Cap duration (e.g. 3 minutes) — this also caps per-message ElevenLabs cost, not just latency. A 40-minute forwarded audio file is a cost and latency problem with no upside. Check the duration via `ffprobe` *before* calling ElevenLabs at all, not after — the cap exists specifically to bound spend, so it has to gate the paid call, not just log a warning alongside it.
+
+The Whisper fallback here is the OpenAI API (`OPENAI_API_KEY`), not self-hosted IndicConformer — that stays unimplemented for now. If both `ELEVENLABS_API_KEY` transcription and `OPENAI_API_KEY` are unset or failing, the fallback chain has no floor and every audio/video message gets the honest failure reply. Fine while `OPENAI_API_KEY` is optional/unset in dev; revisit before relying on this in front of real users.
 
 ### 7.5 Concurrency: never block the event loop
 `ffmpeg` invocation and any non-async provider SDK calls (Bhashini, some Gemini/Groq clients) are blocking. If they run inline inside an `async def` handler, they stall the entire event loop — including the webhook ACK path for *other* users' concurrent requests, silently violating the "200 in milliseconds" requirement from §6.2. Run every blocking call through `asyncio.to_thread(...)` or as a subprocess with `asyncio.create_subprocess_exec`, never as a direct synchronous call inside request-handling code.
