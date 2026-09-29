@@ -6,7 +6,10 @@ from fastapi.responses import PlainTextResponse
 
 from app.config import settings
 from app.db import cache as db_cache
+from app.db import feedback as db_feedback
+from app.db import rate_limit as db_rate_limit
 from app.db import submissions as db_submissions
+from app.db import trending as db_trending
 from app.pipeline.normalize import AudioTooLongError, extract_audio_track, normalize_audio, normalize_image
 from app.pipeline.orchestrator import run_text_pipeline
 from app.util import hash_phone
@@ -23,6 +26,11 @@ app = FastAPI()
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.get("/trending")
+async def trending():
+    return await db_trending.get_trending()
 
 
 @app.get("/webhook")
@@ -60,12 +68,14 @@ async def receive_webhook(request: Request, bg: BackgroundTasks):
 async def handle_message(msg: InboundMessage) -> None:
     try:
         if msg.is_reaction:
-            logger.info("Reaction %s on %s from %s", msg.reaction_emoji, msg.reaction_target_wamid, msg.sender)
+            await _handle_reaction(msg)
             return
+
+        wa_user_hash = hash_phone(msg.sender)
 
         is_new = await db_submissions.claim_submission(
             wamid=msg.wamid,
-            wa_user_hash=hash_phone(msg.sender),
+            wa_user_hash=wa_user_hash,
             input_type=msg.type,
             forwarded=msg.forwarded,
             frequently_forwarded=msg.frequently_forwarded,
@@ -74,10 +84,24 @@ async def handle_message(msg: InboundMessage) -> None:
             logger.info("Dropping duplicate delivery of %s", msg.wamid)
             return
 
+        # Cap per-user throughput before spending anything on the pipeline --
+        # one user forwarding their whole chat history shouldn't exhaust the
+        # daily Gemini/ElevenLabs/Tavily quota for everyone else.
+        under_limit = await db_rate_limit.check_and_increment(wa_user_hash)
+        if not under_limit:
+            logger.info("Rate limit exceeded for wamid=%s", msg.wamid)
+            await send_text_reply(
+                to=msg.sender,
+                body="You've sent quite a few messages in the last hour -- please wait a bit before sending more.",
+                reply_to_wamid=msg.wamid,
+            )
+            await db_submissions.mark_submission(msg.wamid, "rate_limited")
+            return
+
         await mark_read(msg.wamid)
 
         reply_text, pending_write, cache_hit = await _compose_reply(msg)
-        await send_text_reply(to=msg.sender, body=reply_text, reply_to_wamid=msg.wamid)
+        send_result = await send_text_reply(to=msg.sender, body=reply_text, reply_to_wamid=msg.wamid)
 
         # Cache write happens only after a successful send, so a DB hiccup here
         # never costs the user their answer.
@@ -86,6 +110,13 @@ async def handle_message(msg: InboundMessage) -> None:
                 await db_cache.insert_claim(pending_write)
             except Exception:
                 logger.exception("Cache write failed after successful send for wamid=%s", msg.wamid)
+
+        try:
+            reply_wamid = send_result.get("messages", [{}])[0].get("id")
+            if reply_wamid:
+                await db_submissions.set_reply_wamid(msg.wamid, reply_wamid)
+        except Exception:
+            logger.exception("Failed to store reply_wamid for wamid=%s", msg.wamid)
 
         try:
             await db_submissions.mark_submission(msg.wamid, "done", cache_hit=cache_hit)
@@ -196,3 +227,23 @@ async def _compose_audio_or_video_reply(msg: InboundMessage) -> tuple[str, dict 
 
     result = await run_text_pipeline(combined, msg.frequently_forwarded)
     return result.reply_text, result.pending_claim_write, result.cache_hit
+
+
+async def _handle_reaction(msg: InboundMessage) -> None:
+    """A reaction never runs the pipeline -- just join it back to the
+    submission it's reacting to (via the reply_wamid we stored when we sent
+    that reply) and log it as feedback.
+    """
+    if not msg.reaction_target_wamid or not msg.reaction_emoji:
+        return
+    try:
+        submission_id = await db_submissions.find_submission_id_by_reply_wamid(msg.reaction_target_wamid)
+        if submission_id is None:
+            logger.info(
+                "Reaction %s on unknown reply %s -- probably reacting to something other than our own reply",
+                msg.reaction_emoji, msg.reaction_target_wamid,
+            )
+            return
+        await db_feedback.insert_feedback(submission_id, msg.reaction_target_wamid, msg.reaction_emoji)
+    except Exception:
+        logger.exception("Failed to record reaction feedback for wamid=%s", msg.wamid)

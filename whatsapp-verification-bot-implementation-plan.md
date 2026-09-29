@@ -552,6 +552,8 @@ On a cache miss, after a successful reply: insert into `claims` with text, hash,
 ### 12.1 Reactions
 A `reaction`-type inbound message carries the emoji and the `wamid` it was applied to. Match that against stored reply IDs, insert into `feedback`, and return without running the pipeline. Free usage signal: *X% of verdicts were reacted to positively.*
 
+Requires a `submissions.reply_wamid` column that the original Phase 3 schema didn't include, even though this section always assumed it — added via an M8 migration (`alter table submissions add column reply_wamid text`, plus an index for the lookup). Set it right after `send_text_reply` returns the outgoing message's own wamid; look it up by `reaction_target_wamid` when a reaction arrives. A reaction on a wamid not found this way is logged and dropped, not an error — it could be a reaction to something other than one of our replies.
+
 ### 12.2 Trending feed
 Already free from the cache table:
 
@@ -564,6 +566,8 @@ limit 20;
 ```
 
 Expose as a read-only endpoint. A small public dashboard on top of this is the strongest demo asset in the project — most fact-check tools are one-off and reactive; an aggregate view of what is spreading right now is not.
+
+Implemented as `GET /trending`, unauthenticated. Fine for a demo; revisit before this is truly public (no rate limit or auth on it currently — cheap for anyone to hit, unlike the LLM-backed endpoints).
 
 ---
 
@@ -592,6 +596,8 @@ Mitigation for MVP (no new infra required): add a scheduled sweep (cron, or a ch
 Cap per-user submissions (e.g. 20/hour, keyed on hashed number). One user forwarding their whole chat history should not exhaust the daily Gemini quota for everyone.
 
 **Make the check atomic.** A check-then-write pattern (`SELECT count`, then `INSERT` if under the cap) races under concurrent bursts — a user firing several messages within the same second can slip past the cap before the first insert lands. Use a single atomic statement instead, e.g. an `UPDATE ... SET count = count + 1 WHERE window = current_window() RETURNING count`, and reject only if the returned count exceeds the cap.
+
+Implemented as a `rate_limits (wa_user_hash, window_start, count)` table (another M8 addition beyond the Phase 3 schema) plus a Postgres function, `increment_rate_limit`, that does the insert-or-increment-and-return in one atomic statement via `on conflict ... do update ... returning count`. The check runs in `handle_message` right after the idempotency check and before `mark_read`/the pipeline, so a rejected message never touches Gemini/ElevenLabs/Tavily at all. Verified live: incrementing the same hashed user past 20 in an hour correctly flips the result to reject on the 21st call, still keyed to the same hour bucket.
 
 **Combined quota, not just per-user.** Per-user capping doesn't protect against many distinct users hitting a genuinely novel viral claim at once — the cache only helps once a claim has been seen. Before launch, size the combined free-tier throughput of Gemini + Groq against a plausible spike (e.g. N forwards/hour at X% cache-miss rate) and decide the degrade path (a "high volume right now, please retry shortly" reply) rather than discovering the ceiling live. ElevenLabs adds a cost dimension on top of throughput — a spike in audio forwards has a direct dollar cost, not just a quota risk, so alerting on ElevenLabs spend is worth setting up before any public push.
 

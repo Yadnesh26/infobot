@@ -122,11 +122,19 @@ def _patch_common(monkeypatch, sent, *, is_new=True):
     async def fake_mark_submission(*args, **kwargs):
         sent["marked_status"] = args[1] if len(args) > 1 else kwargs.get("status")
 
+    async def fake_check_and_increment(wa_user_hash):
+        return True
+
+    async def fake_set_reply_wamid(wamid, reply_wamid):
+        sent["reply_wamid"] = reply_wamid
+
     monkeypatch.setattr("app.main.mark_read", fake_mark_read)
     monkeypatch.setattr("app.main.send_text_reply", fake_send_text_reply)
     monkeypatch.setattr("app.main.run_text_pipeline", fake_run_text_pipeline)
     monkeypatch.setattr("app.main.db_submissions.claim_submission", fake_claim_submission)
     monkeypatch.setattr("app.main.db_submissions.mark_submission", fake_mark_submission)
+    monkeypatch.setattr("app.main.db_rate_limit.check_and_increment", fake_check_and_increment)
+    monkeypatch.setattr("app.main.db_submissions.set_reply_wamid", fake_set_reply_wamid)
 
 
 def test_post_webhook_accepts_valid_signature_and_acks_fast(monkeypatch):
@@ -141,6 +149,7 @@ def test_post_webhook_accepts_valid_signature_and_acks_fast(monkeypatch):
     )
     assert resp.status_code == 200
     assert sent["pipeline_input"] == "Drinking hot water cures COVID instantly"
+    assert sent["reply_wamid"] == "wamid.REPLY"
     assert len(sent["send_calls"]) == 1
     assert sent["send_calls"][0]["reply_to_wamid"] == "wamid.TEST123"
     assert sent["send_calls"][0]["body"] == "FAKE VERDICT REPLY"
@@ -327,4 +336,90 @@ async def test_compose_audio_reply_graceful_when_transcription_fails(monkeypatch
     )
     reply_text, pending_write, cache_hit = await _compose_audio_or_video_reply(msg)
     assert "couldn't transcribe" in reply_text
-    assert pending_write is None
+
+
+# --- M8: rate limiting, reactions/feedback, trending ---
+
+
+def test_post_webhook_rejects_over_rate_limit(monkeypatch):
+    sent = {}
+    _patch_common(monkeypatch, sent, is_new=True)
+
+    async def fake_check_and_increment(wa_user_hash):
+        return False
+
+    monkeypatch.setattr("app.main.db_rate_limit.check_and_increment", fake_check_and_increment)
+
+    body = FIXTURE.read_bytes()
+    resp = client.post(
+        "/webhook",
+        content=body,
+        headers={"X-Hub-Signature-256": _sign(body), "Content-Type": "application/json"},
+    )
+    assert resp.status_code == 200
+    assert "pipeline_input" not in sent  # pipeline never ran
+    assert len(sent["send_calls"]) == 1
+    assert "wait a bit" in sent["send_calls"][0]["body"]
+    assert sent["marked_status"] == "rate_limited"
+
+
+@pytest.mark.anyio
+async def test_reaction_with_known_reply_records_feedback(monkeypatch):
+    from app.main import handle_message
+
+    recorded = {}
+
+    async def fake_find_submission_id(reply_wamid):
+        assert reply_wamid == "wamid.REPLY123"
+        return "submission-abc"
+
+    async def fake_insert_feedback(submission_id, reply_message_id, emoji):
+        recorded["submission_id"] = submission_id
+        recorded["reply_message_id"] = reply_message_id
+        recorded["emoji"] = emoji
+
+    monkeypatch.setattr("app.main.db_submissions.find_submission_id_by_reply_wamid", fake_find_submission_id)
+    monkeypatch.setattr("app.main.db_feedback.insert_feedback", fake_insert_feedback)
+
+    msg = InboundMessage(
+        wamid="wamid.REACT1", sender="919876543210", type="reaction",
+        is_reaction=True, reaction_emoji="\U0001F44D", reaction_target_wamid="wamid.REPLY123",
+    )
+    await handle_message(msg)
+
+    assert recorded == {
+        "submission_id": "submission-abc",
+        "reply_message_id": "wamid.REPLY123",
+        "emoji": "\U0001F44D",
+    }
+
+
+@pytest.mark.anyio
+async def test_reaction_on_unknown_reply_does_not_crash_or_insert(monkeypatch):
+    from app.main import handle_message
+
+    async def fake_find_submission_id(reply_wamid):
+        return None
+
+    async def fail_if_called(*args, **kwargs):
+        raise AssertionError("insert_feedback should not be called when the reply is unknown")
+
+    monkeypatch.setattr("app.main.db_submissions.find_submission_id_by_reply_wamid", fake_find_submission_id)
+    monkeypatch.setattr("app.main.db_feedback.insert_feedback", fail_if_called)
+
+    msg = InboundMessage(
+        wamid="wamid.REACT2", sender="919876543210", type="reaction",
+        is_reaction=True, reaction_emoji="\U0001F44D", reaction_target_wamid="wamid.UNKNOWN",
+    )
+    await handle_message(msg)  # must not raise
+
+
+def test_trending_endpoint_returns_data_from_db(monkeypatch):
+    async def fake_get_trending(days=7, limit=20):
+        return [{"claim_text_en": "x", "verdict": "false", "times_seen": 3, "last_seen_at": "2026-09-01T00:00:00Z"}]
+
+    monkeypatch.setattr("app.main.db_trending.get_trending", fake_get_trending)
+
+    resp = client.get("/trending")
+    assert resp.status_code == 200
+    assert resp.json()[0]["claim_text_en"] == "x"

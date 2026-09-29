@@ -32,3 +32,17 @@ async def mark_submission(wamid: str, status: str, *, error: str | None = None, 
     if cache_hit is not None:
         body["cache_hit"] = cache_hit
     await db.patch("submissions", {"wa_message_id": f"eq.{wamid}"}, body)
+
+
+async def set_reply_wamid(wamid: str, reply_wamid: str) -> None:
+    """Stored so a later reaction webhook (which only carries the reply's own
+    wamid) can be joined back to the submission it's reacting to.
+    """
+    await db.patch("submissions", {"wa_message_id": f"eq.{wamid}"}, {"reply_wamid": reply_wamid})
+
+
+async def find_submission_id_by_reply_wamid(reply_wamid: str) -> str | None:
+    rows = await db.get(
+        "submissions", {"reply_wamid": f"eq.{reply_wamid}", "select": "id", "limit": "1"}
+    )
+    return rows[0]["id"] if rows else None
