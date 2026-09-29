@@ -8,6 +8,7 @@ class InboundMessage:
     type: str
     text: str | None = None
     media_id: str | None = None
+    media_mime_type: str | None = None
     caption: str | None = None
     forwarded: bool = False
     frequently_forwarded: bool = False
@@ -50,6 +51,7 @@ def _parse_one(msg: dict) -> InboundMessage:
 
     text = None
     media_id = None
+    media_mime_type = None
     caption = None
 
     if msg_type == "text":
@@ -57,6 +59,7 @@ def _parse_one(msg: dict) -> InboundMessage:
     elif msg_type in ("image", "audio", "video"):
         media = msg.get(msg_type, {})
         media_id = media.get("id")
+        media_mime_type = media.get("mime_type")
         caption = media.get("caption")
 
     return InboundMessage(
@@ -65,6 +68,7 @@ def _parse_one(msg: dict) -> InboundMessage:
         type=msg_type,
         text=text,
         media_id=media_id,
+        media_mime_type=media_mime_type,
         caption=caption,
         forwarded=bool(context.get("forwarded", False)),
         frequently_forwarded=bool(context.get("frequently_forwarded", False)),

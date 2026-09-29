@@ -7,9 +7,10 @@ from fastapi.responses import PlainTextResponse
 from app.config import settings
 from app.db import cache as db_cache
 from app.db import submissions as db_submissions
+from app.pipeline.normalize import normalize_image
 from app.pipeline.orchestrator import run_text_pipeline
 from app.util import hash_phone
-from app.whatsapp.client import mark_read, send_text_reply
+from app.whatsapp.client import download_media, mark_read, send_text_reply
 from app.whatsapp.parser import InboundMessage, extract_messages
 from app.whatsapp.verify import valid_signature
 
@@ -111,11 +112,40 @@ async def _compose_reply(msg: InboundMessage) -> tuple[str, dict | None, str | N
     if msg.type == "text" and msg.text:
         result = await run_text_pipeline(msg.text, msg.frequently_forwarded)
         return result.reply_text, result.pending_claim_write, result.cache_hit
-    if msg.type in ("image", "audio", "video"):
+
+    if msg.type == "image":
+        return await _compose_image_reply(msg)
+
+    if msg.type in ("audio", "video"):
         extra = f" Caption: \"{msg.caption}\"" if msg.caption else ""
         return (
-            f"Got your {msg.type}.{extra} (Media verification not wired up yet -- text-only for now.)",
+            f"Got your {msg.type}.{extra} (Audio/video verification not wired up yet.)",
             None,
             None,
         )
     return "Got your message, but I couldn't find any text to check.", None, None
+
+
+async def _compose_image_reply(msg: InboundMessage) -> tuple[str, dict | None, str | None]:
+    if not msg.media_id:
+        return "Got your image, but there was no attachment to download.", None, None
+
+    try:
+        image_bytes = await download_media(msg.media_id)
+    except Exception:
+        logger.exception("Failed to download image for wamid=%s", msg.wamid)
+        return "I couldn't download that image -- could you try resending it?", None, None
+
+    mime_type = msg.media_mime_type or "image/jpeg"
+    extracted_text = await normalize_image(image_bytes, mime_type, msg.caption)
+
+    if extracted_text is None:
+        return (
+            "I couldn't find any readable text in that image, and there's no "
+            "caption either -- nothing here for me to check.",
+            None,
+            None,
+        )
+
+    result = await run_text_pipeline(extracted_text, msg.frequently_forwarded)
+    return result.reply_text, result.pending_claim_write, result.cache_hit

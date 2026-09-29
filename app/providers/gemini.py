@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 import logging
 
@@ -16,8 +17,20 @@ class GeminiError(Exception):
     pass
 
 
-async def generate_json(prompt: str, schema: dict, thinking_level: str = "low") -> dict:
+def build_image_input(text_prompt: str, image_bytes: bytes, mime_type: str) -> list:
+    """Shape the Interactions API's multimodal `input` array: a text part plus
+    an inline base64 image part."""
+    return [
+        {"type": "text", "text": text_prompt},
+        {"type": "image", "data": base64.b64encode(image_bytes).decode("ascii"), "mime_type": mime_type},
+    ]
+
+
+async def generate_json(input_data: str | list, schema: dict, thinking_level: str = "low") -> dict:
     """Call the Gemini Interactions API and parse a JSON response matching schema.
+
+    input_data is either a plain prompt string, or a multimodal list built by
+    build_image_input.
 
     Retries once total across either a transient provider error (e.g. the "high
     demand" 503 this model returns under load) or a JSON parse failure, then
@@ -26,7 +39,7 @@ async def generate_json(prompt: str, schema: dict, thinking_level: str = "low") 
     """
     body = {
         "model": settings.GEMINI_MODEL,
-        "input": prompt,
+        "input": input_data,
         "generation_config": {"thinking_level": thinking_level},
         "response_format": {
             "type": "text",

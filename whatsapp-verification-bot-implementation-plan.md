@@ -375,9 +375,11 @@ GET {url}  with Authorization: Bearer WA_TOKEN      → returns the bytes
 The second call **must** carry the auth header. Media is retrievable for 7 days server-side, but download it immediately.
 
 ### 7.3 Image → text
-Single Gemini Flash call. Do not add a separate OCR stage — fold extraction into the same call that reads the image. Prompt it to return the visible text verbatim in its original script, plus any caption text you pass alongside.
+Single Gemini Flash call. Do not add a separate OCR stage — fold extraction into the same call that reads the image. Prompt it to return the visible text verbatim in its original script, plus any caption text you pass alongside. On the Interactions API this means passing a multimodal `input` array (`[{"type": "text", ...}, {"type": "image", "data": <base64>, "mime_type": ...}]`) rather than a plain string, with the image inlined as base64 — fine at WhatsApp's media sizes, well under the API's 20MB inline limit.
 
-Handle "no readable text" explicitly — memes with only a photo and no words are common. That path should produce a graceful reply, not an exception.
+Handle "no readable text" explicitly — memes with only a photo and no words are common. That path should produce a graceful reply, not an exception. Trust the model's own `has_readable_text` flag over the text it fills in, not the other way around — a model that occasionally puts stray text in the field despite flagging false shouldn't get to override its own signal.
+
+Once you have `raw_text` (OCR'd text plus caption, joined), hand it straight to the same text pipeline used for forwarded text messages (extract/classify/verify/compose) — an image is just a slower way to arrive at text, not a separate pipeline.
 
 ### 7.4 Audio / video → text
 1. If video, extract the audio track (`ffmpeg -i in.mp4 -vn -acodec pcm_s16le out.wav`). Discard the video. You are not analyzing visuals.
