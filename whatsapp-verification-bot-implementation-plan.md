@@ -23,6 +23,7 @@ A forward-and-verify WhatsApp bot. User forwards any suspicious message (text, i
 - Gemini Flash for OCR, claim extraction, classification, verification, verdict generation
 - ElevenLabs Scribe for transcription (paid, metered — ~$0.22/hr of audio, ~30 free min/month), with Whisper / self-hosted IndicConformer as fallback when quota or budget runs out. Chosen over Bhashini for reliability and setup speed — Bhashini's government registration process was the single slowest, least certain step in the whole credential list, and Scribe's published word error rate on Hindi/Marathi beats Whisper's in third-party benchmarks
 - Groq as free text-reasoning overflow when Gemini's daily quota is hit (OpenRouter deferred for now — see credential setup notes)
+- Tavily for T2 search grounding (1,000 free credits/month, no card required). Chosen over Gemini's built-in Google Search grounding tool, which returned "quota exceeded" immediately on this account even on a fresh request — strongly suggesting it now requires a linked Google Cloud billing account, not just free-tier usage. Tavily also returns clean, pre-summarized content rather than raw HTML SERPs, which is a better fit for feeding straight into the verification prompt
 - Supabase (Postgres + pgvector) for caching, logging, trending feed
 - Languages: Hindi, English, Marathi (plus code-mixed Hinglish/Romanized input)
 - Tier system: T1 confident, T2 search-grounded, T3a soft, T3b hard stop
@@ -87,6 +88,7 @@ Complete all of these before writing code. Only ElevenLabs requires payment deta
 | Supabase | New project | `SUPABASE_URL`, `SUPABASE_SERVICE_KEY` |
 | Meta for Developers | App + WhatsApp product | `WA_PHONE_NUMBER_ID`, `WA_TOKEN`, `WA_VERIFY_TOKEN`, `WA_APP_SECRET` |
 | ElevenLabs | API key | `ELEVENLABS_API_KEY` — primary transcription (Scribe), paid/metered beyond ~30 free min/month |
+| Tavily | API key | `TAVILY_API_KEY` — T2 search grounding, 1,000 free credits/month, no card required |
 | Groq | API key | `GROQ_API_KEY` (fallback) |
 | OpenRouter | API key | `OPENROUTER_API_KEY` (fallback — deferred for now) |
 
@@ -143,6 +145,7 @@ whatsapp-verify-bot/
 │   │   └── compose.py          # verdict → WhatsApp-ready reply text
 │   ├── providers/
 │   │   ├── gemini.py
+│   │   ├── tavily.py           # T2 search grounding
 │   │   ├── elevenlabs.py       # primary transcription (Scribe)
 │   │   ├── whisper.py          # fallback
 │   │   └── fallback_llm.py     # Groq (OpenRouter deferred)
@@ -461,20 +464,23 @@ Route on tier. Four distinct prompts, four distinct output shapes.
 Verify from the model's own knowledge. Output verdict + confidence + a short explanation in English. No search.
 
 ### 10.2 Tier 2 — search-grounded
-1. Run searches in **both** English and the original language. A Marathi-specific rumor may only ever have been addressed in Marathi coverage; an English-only search will miss it and you'll wrongly return "unverifiable".
-2. Prioritize: Indian fact-check outlets (BOOM, Alt News, Vishvas News, Newschecker, Factly), health authorities (WHO, ICMR, AIIMS), primary scientific sources, mainstream reporting.
-3. Feed results to Gemini; require it to cite which retrieved source supports the verdict.
-4. Return `unverifiable` honestly when nothing credible is found. A confident guess is worse than an admitted gap.
+1. Run searches in **both** English and the original language via Tavily (`app/providers/tavily.py`). A Marathi-specific rumor may only ever have been addressed in Marathi coverage; an English-only search will miss it and you'll wrongly return "unverifiable". Skip the second-language pass when the claim is already in English.
+2. Prioritize: Indian fact-check outlets (BOOM, Alt News, Vishvas News, Newschecker, Factly), health authorities (WHO, ICMR, AIIMS), primary scientific sources, mainstream reporting — implemented as an extra `include_domains`-biased search pass over those outlets, merged with the general results rather than restricting to them exclusively.
+3. Feed results to Gemini; require it to mark, per cited source, whether it supports or contradicts the verdict — this is what makes the confidence derivation below structural instead of a guess.
+4. Return `unverifiable` honestly when nothing credible is found. A confident guess is worse than an admitted gap. Enforce this in code too, not just the prompt: if the model returns an empty source list, force the verdict to `unverifiable` regardless of what it claimed — never trust a verdict with nothing behind it.
+5. Don't cache an `unverifiable` result. Unlike a real verdict, it describes today's available sources, not the claim itself — a breaking rumor's coverage improves over time, and caching the gap would make it permanent instead of letting the next forward try again.
 
 **Confidence must be structural, not self-reported.** LLM-stated percentages are not calibrated. Derive it:
 
-| Signal | Effect |
-|---|---|
-| Multiple independent credible sources agree | High |
-| Single credible source | Medium |
-| Sources conflict | Low, and say so in the reply |
-| No sources found | `unverifiable`, no number |
-| Tier 1 (no retrieval) | Cap below what a well-sourced T2 can reach |
+| Signal | Effect | Implemented as |
+|---|---|---|
+| Multiple independent credible sources agree | High | ≥2 distinct-domain sources marked `supports_verdict: true` → 85 |
+| Single credible source | Medium | exactly 1 supporting domain → 55 |
+| Sources conflict | Low, and say so in the reply | both supporting and contradicting domains present → 20 |
+| No sources found | `unverifiable`, no number | empty source list → forced `unverifiable`, confidence `null` |
+| Tier 1 (no retrieval) | Cap below what a well-sourced T2 can reach | 60 (confident) / 25 (unsure) — never reaches the ≥70 "High" bucket |
+
+"Independent" is approximated as *distinct domain* — a cheap proxy that won't catch two outlets syndicating the same wire copy. Worth revisiting if that turns out to matter in practice.
 
 ### 10.3 Tier 3a — soft answer
 Constraints, enforced in the prompt:
@@ -689,10 +695,12 @@ WA_APP_SECRET=
 WA_API_VERSION=v21.0
 
 GEMINI_API_KEY=
-GEMINI_MODEL=
-GEMINI_EMBED_MODEL=
+GEMINI_MODEL=gemini-3.1-flash-lite
+GEMINI_EMBED_MODEL=gemini-embedding-001
 
 ELEVENLABS_API_KEY=
+
+TAVILY_API_KEY=
 
 GROQ_API_KEY=
 OPENROUTER_API_KEY=

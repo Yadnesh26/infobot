@@ -40,11 +40,22 @@ async def extract_and_classify(raw_text: str, frequently_forwarded: bool) -> Cla
     if frequently_forwarded and tier == "t1":
         tier = "t2"  # high virality justifies the extra scrutiny/search cost
 
+    # The model occasionally lets its own hedging leak into one field and leaves
+    # the other blank, especially on ambiguous/self-correcting claims. Neither
+    # downstream search nor verification can work from an empty string, so fall
+    # back to whichever field it did fill in rather than searching for "".
+    claim_original = data.get("claim_original") or ""
+    claim_english = data.get("claim_english") or ""
+    if not claim_english:
+        claim_english = claim_original
+    if not claim_original:
+        claim_original = claim_english
+
     return ClassifyResult(
         detected_language=data.get("detected_language", ""),
         is_verifiable_claim=bool(data.get("is_verifiable_claim", False)),
-        claim_original=data.get("claim_original") or "",
-        claim_english=data.get("claim_english") or "",
+        claim_original=claim_original,
+        claim_english=claim_english,
         tier=tier,
         domain=data.get("domain", "other"),
     )

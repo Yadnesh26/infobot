@@ -14,9 +14,9 @@ class Settings(BaseSettings):
     GEMINI_MODEL: str = ""
     GEMINI_EMBED_MODEL: str = ""
 
-    BHASHINI_USER_ID: str = ""
-    BHASHINI_API_KEY: str = ""
-    BHASHINI_PIPELINE_ID: str = ""
+    ELEVENLABS_API_KEY: str = ""
+
+    TAVILY_API_KEY: str = ""
 
     GROQ_API_KEY: str = ""
     OPENROUTER_API_KEY: str = ""
