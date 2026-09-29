@@ -20,8 +20,8 @@ A forward-and-verify WhatsApp bot. User forwards any suspicious message (text, i
 
 - WhatsApp Business Platform — Meta Cloud API, direct (no BSP)
 - Gemini Flash for OCR, claim extraction, classification, verification, verdict generation
-- Bhashini for transcription, with Whisper / self-hosted IndicConformer as fallback
-- Groq + OpenRouter as free text-reasoning overflow when Gemini's daily quota is hit
+- ElevenLabs Scribe for transcription (paid, metered — ~$0.22/hr of audio, ~30 free min/month), with Whisper / self-hosted IndicConformer as fallback when quota or budget runs out. Chosen over Bhashini for reliability and setup speed — Bhashini's government registration process was the single slowest, least certain step in the whole credential list, and Scribe's published word error rate on Hindi/Marathi beats Whisper's in third-party benchmarks
+- Groq as free text-reasoning overflow when Gemini's daily quota is hit (OpenRouter deferred for now — see credential setup notes)
 - Supabase (Postgres + pgvector) for caching, logging, trending feed
 - Languages: Hindi, English, Marathi (plus code-mixed Hinglish/Romanized input)
 - Tier system: T1 confident, T2 search-grounded, T3a soft, T3b hard stop
@@ -78,16 +78,16 @@ Everything after step (2) is off the request path. The user gets a 200 in millis
 
 ## 2. Phase 0 — Accounts and credentials
 
-Complete all of these before writing code. None require payment details.
+Complete all of these before writing code. Only ElevenLabs requires payment details on file (metered usage beyond its small free tier); everything else is free-tier, no card needed.
 
 | Service | What to create | What you walk away with |
 |---|---|---|
 | Google AI Studio | API key | `GEMINI_API_KEY` |
 | Supabase | New project | `SUPABASE_URL`, `SUPABASE_SERVICE_KEY` |
 | Meta for Developers | App + WhatsApp product | `WA_PHONE_NUMBER_ID`, `WA_TOKEN`, `WA_VERIFY_TOKEN`, `WA_APP_SECRET` |
-| Bhashini / ULCA | Developer registration | `BHASHINI_USER_ID`, `BHASHINI_API_KEY`, pipeline ID |
+| ElevenLabs | API key | `ELEVENLABS_API_KEY` — primary transcription (Scribe), paid/metered beyond ~30 free min/month |
 | Groq | API key | `GROQ_API_KEY` (fallback) |
-| OpenRouter | API key | `OPENROUTER_API_KEY` (fallback) |
+| OpenRouter | API key | `OPENROUTER_API_KEY` (fallback — deferred for now) |
 
 **Checkpoint:** you can `curl` Gemini and get a response; you can connect to Supabase from `psql` or the dashboard SQL editor.
 
@@ -142,9 +142,9 @@ whatsapp-verify-bot/
 │   │   └── compose.py          # verdict → WhatsApp-ready reply text
 │   ├── providers/
 │   │   ├── gemini.py
-│   │   ├── bhashini.py
+│   │   ├── elevenlabs.py       # primary transcription (Scribe)
 │   │   ├── whisper.py          # fallback
-│   │   └── fallback_llm.py     # Groq / OpenRouter
+│   │   └── fallback_llm.py     # Groq (OpenRouter deferred)
 │   ├── db/
 │   │   ├── client.py
 │   │   ├── cache.py            # exact + semantic lookup, write
@@ -377,11 +377,11 @@ Handle "no readable text" explicitly — memes with only a photo and no words ar
 
 ### 7.4 Audio / video → text
 1. If video, extract the audio track (`ffmpeg -i in.mp4 -vn -acodec pcm_s16le out.wav`). Discard the video. You are not analyzing visuals.
-2. Send audio to Bhashini ASR.
-3. On error, timeout, or empty result → fall back to Whisper (API or self-hosted).
+2. Send audio to ElevenLabs Scribe.
+3. On error, timeout, empty result, or free/paid quota exhausted → fall back to Whisper (API or self-hosted).
 4. On both failing → reply honestly that the audio couldn't be processed.
 
-Cap duration (e.g. 3 minutes). A 40-minute forwarded audio file is a cost and latency problem with no upside.
+Cap duration (e.g. 3 minutes) — this also caps per-message ElevenLabs cost, not just latency. A 40-minute forwarded audio file is a cost and latency problem with no upside.
 
 ### 7.5 Concurrency: never block the event loop
 `ffmpeg` invocation and any non-async provider SDK calls (Bhashini, some Gemini/Groq clients) are blocking. If they run inline inside an `async def` handler, they stall the entire event loop — including the webhook ACK path for *other* users' concurrent requests, silently violating the "200 in milliseconds" requirement from §6.2. Run every blocking call through `asyncio.to_thread(...)` or as a subprocess with `asyncio.create_subprocess_exec`, never as a direct synchronous call inside request-handling code.
@@ -562,8 +562,8 @@ Expose as a read-only endpoint. A small public dashboard on top of this is the s
 
 | Failure | Response |
 |---|---|
-| Gemini quota exhausted | Route text-only reasoning to Groq, then OpenRouter. Vision has no fallback — reply asking for the text version |
-| Bhashini fails/times out | Whisper → self-hosted IndicConformer → honest failure message |
+| Gemini quota exhausted | Route text-only reasoning to Groq (OpenRouter deferred). Vision has no fallback — reply asking for the text version |
+| ElevenLabs fails/times out/quota exhausted | Whisper → self-hosted IndicConformer → honest failure message |
 | Search returns nothing | Return `unverifiable` with low confidence. Do not invent |
 | JSON parse failure | Retry once, then generic failure reply |
 | Media download fails | Ask the user to resend |
@@ -582,10 +582,10 @@ Cap per-user submissions (e.g. 20/hour, keyed on hashed number). One user forwar
 
 **Make the check atomic.** A check-then-write pattern (`SELECT count`, then `INSERT` if under the cap) races under concurrent bursts — a user firing several messages within the same second can slip past the cap before the first insert lands. Use a single atomic statement instead, e.g. an `UPDATE ... SET count = count + 1 WHERE window = current_window() RETURNING count`, and reject only if the returned count exceeds the cap.
 
-**Combined quota, not just per-user.** Per-user capping doesn't protect against many distinct users hitting a genuinely novel viral claim at once — the cache only helps once a claim has been seen. Before launch, size the combined free-tier throughput of Gemini + Groq + OpenRouter against a plausible spike (e.g. N forwards/hour at X% cache-miss rate) and decide the degrade path (a "high volume right now, please retry shortly" reply) rather than discovering the ceiling live.
+**Combined quota, not just per-user.** Per-user capping doesn't protect against many distinct users hitting a genuinely novel viral claim at once — the cache only helps once a claim has been seen. Before launch, size the combined free-tier throughput of Gemini + Groq against a plausible spike (e.g. N forwards/hour at X% cache-miss rate) and decide the degrade path (a "high volume right now, please retry shortly" reply) rather than discovering the ceiling live. ElevenLabs adds a cost dimension on top of throughput — a spike in audio forwards has a direct dollar cost, not just a quota risk, so alerting on ElevenLabs spend is worth setting up before any public push.
 
 ### 13.3 Timeouts
-Set explicit timeouts on every outbound call (Gemini 30s, Bhashini 60s, search 15s). A hung provider call is an invisible job that never replies.
+Set explicit timeouts on every outbound call (Gemini 30s, ElevenLabs 60s, search 15s). A hung provider call is an invisible job that never replies.
 
 ### 13.4 Service window
 Replies are free only inside the 24-hour service window opened by the user's message. Within seconds you are always inside it — but if you ever add delayed or proactive messaging, that becomes a paid template message. Log a warning rather than silently failing if a send is attempted outside the window.
@@ -652,7 +652,7 @@ Do not build all of this before the first end-to-end run. Each milestone is demo
 | **M4 — T2 grounding** | Bilingual search, source links, structural confidence | A recent local rumor returns a cited verdict |
 | **M5 — Safety tiers** | t3a soft path, t3b hard stop, full fixture pass | Every dosage question in the fixture set hits t3b |
 | **M6 — Images** | Gemini vision + caption handling | A meme screenshot returns a verdict |
-| **M7 — Audio/video** | Bhashini + fallback + ffmpeg extraction | A voice note returns a verdict |
+| **M7 — Audio/video** | ElevenLabs Scribe + fallback + ffmpeg extraction | A voice note returns a verdict |
 | **M8 — Polish** | Reactions, trending endpoint, forward-count prioritization, rate limits | Dashboard shows top claims of the week |
 
 M1–M3 is the smallest thing worth showing anyone. M5 is the point where it is safe to put in front of people who aren't you.
@@ -665,9 +665,9 @@ M1–M3 is the smallest thing worth showing anyone. M5 is the point where it is 
 |---|---|---|
 | t3b misclassified as t3a | Medium | Highest-priority test case. Prompt the model to default to t3b when uncertain. Manual review of every t3a in the fixture set |
 | Semantic cache serves wrong verdict | Medium | Conservative threshold, log every hit with similarity, review before raising the match rate |
-| Gemini free quota exhausted mid-demo | Medium | Cache + Groq/OpenRouter fallback. Warm the cache with known claims before any live demo |
-| Marathi transcription too weak to be useful | Medium | Benchmark early in M7. If both Bhashini and Whisper underperform, ship Marathi text-only and say so |
-| Bhashini API unreliable | Medium | Fallback chain already designed; self-hosted IndicConformer is the floor |
+| Gemini free quota exhausted mid-demo | Medium | Cache + Groq fallback. Warm the cache with known claims before any live demo |
+| Marathi transcription too weak to be useful | Medium | Benchmark early in M7. If both ElevenLabs and Whisper underperform, ship Marathi text-only and say so |
+| ElevenLabs cost scales with audio-forward volume | Medium | Metered by the minute, not free like the rest of the stack — cap audio duration (already planned), set spend alerts before any public push, and keep Whisper/self-hosted IndicConformer as a free floor when quota or budget runs out |
 | Supabase project paused | Low | Keep-alive cron |
 | Model confidently wrong on a T1 claim | Medium | Never present certainty you don't have; reactions surface it; consider forcing high-stakes-domain T1s into T2 |
 | Prompt injection inside a forwarded image | Low | Treat extracted text strictly as data. Never let it alter instructions |
@@ -691,9 +691,7 @@ GEMINI_API_KEY=
 GEMINI_MODEL=
 GEMINI_EMBED_MODEL=
 
-BHASHINI_USER_ID=
-BHASHINI_API_KEY=
-BHASHINI_PIPELINE_ID=
+ELEVENLABS_API_KEY=
 
 GROQ_API_KEY=
 OPENROUTER_API_KEY=
