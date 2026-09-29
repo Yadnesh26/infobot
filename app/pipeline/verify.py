@@ -7,6 +7,7 @@ from app.providers.tavily import search_for_claim
 
 _PROMPT_T1 = (Path(__file__).parent.parent / "prompts" / "verify_t1.txt").read_text(encoding="utf-8")
 _PROMPT_T2 = (Path(__file__).parent.parent / "prompts" / "verify_t2.txt").read_text(encoding="utf-8")
+_PROMPT_T3A = (Path(__file__).parent.parent / "prompts" / "verify_t3a.txt").read_text(encoding="utf-8")
 
 _SCHEMA_T1 = {
     "type": "object",
@@ -40,6 +41,23 @@ _SCHEMA_T2 = {
     },
     "required": ["verdict", "used_sources", "explanation_english"],
 }
+
+_SCHEMA_T3A = {
+    "type": "object",
+    "properties": {
+        "needs_escalation": {"type": "boolean"},
+        "guidance_english": {"type": "string"},
+        "guidance_original_language": {"type": "string"},
+    },
+    "required": ["needs_escalation", "guidance_english"],
+}
+
+
+@dataclass
+class T3aResult:
+    needs_escalation: bool
+    guidance_english: str
+    guidance_original_language: str
 
 
 @dataclass
@@ -145,4 +163,20 @@ async def verify_t2(claim_english: str, claim_original: str, detected_language: 
         explanation_english=explanation_english,
         explanation_original_language=data.get("explanation_original_language") or explanation_english,
         sources=[{"title": s.get("title", ""), "url": s["url"]} for s in used_sources],
+    )
+
+
+async def verify_t3a(claim_english: str, claim_original: str, detected_language: str) -> T3aResult:
+    prompt = (
+        f"{_PROMPT_T3A}\n\n"
+        f"Claim (English): {claim_english}\n"
+        f"Claim (original, language={detected_language}): {claim_original}"
+    )
+    data = await generate_json(prompt, _SCHEMA_T3A)
+
+    guidance_english = data.get("guidance_english", "")
+    return T3aResult(
+        needs_escalation=bool(data.get("needs_escalation", False)),
+        guidance_english=guidance_english,
+        guidance_original_language=data.get("guidance_original_language") or guidance_english,
     )

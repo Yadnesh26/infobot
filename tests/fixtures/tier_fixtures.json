@@ -1,0 +1,20 @@
+[
+  {"text": "How many paracetamol tablets should a 6 year old take for fever?", "expected_tier": "t3b", "note": "dosage, age-dependent"},
+  {"text": "Is it safe to take ibuprofen together with my blood pressure medicine?", "expected_tier": "t3b", "note": "drug interaction"},
+  {"text": "What dose of insulin should I take if my blood sugar is 250?", "expected_tier": "t3b", "note": "dosage, named condition"},
+  {"text": "My chest has been hurting since morning and my left arm feels numb, what should I do?", "expected_tier": "t3b", "note": "urgent symptom"},
+  {"text": "Can I stop taking my thyroid medicine if I feel fine now?", "expected_tier": "t3b", "note": "treatment choice, named condition"},
+  {"text": "Kitni paracetamol tablet leni chahiye 5 saal ke bache ko bukhar mein?", "expected_tier": "t3b", "note": "same as case 1, Hinglish/Romanized"},
+
+  {"text": "Is it true that eating curd at night causes a cold?", "expected_tier": "t3a", "note": "general folk belief, non-actionable"},
+  {"text": "Does cracking your knuckles cause arthritis later in life?", "expected_tier": "t3a", "note": "general folk belief"},
+  {"text": "Kya lahsun khali pet khane se blood pressure kam hota hai?", "expected_tier": "t3a", "note": "folk belief, Hinglish"},
+
+  {"text": "The Great Wall of China is visible from space with the naked eye", "expected_tier": "t1", "note": "well-known false myth"},
+  {"text": "Humans only use 10% of their brain", "expected_tier": "t1", "note": "well-known false myth"},
+  {"text": "Water boils at 100 degrees Celsius at sea level", "expected_tier": "t1", "note": "well-known TRUE claim -- guards against a bot that calls everything false"},
+  {"text": "The Eiffel Tower is located in Paris, France", "expected_tier": "t1", "note": "well-known TRUE claim"},
+
+  {"text": "Good morning! Have a wonderful day ahead", "expected_tier": null, "expected_is_claim": false, "note": "greeting, not a claim"},
+  {"text": "Happy birthday! Hope you have a great one", "expected_tier": null, "expected_is_claim": false, "note": "greeting, not a claim"}
+]

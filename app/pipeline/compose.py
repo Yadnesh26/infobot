@@ -1,6 +1,8 @@
+from pathlib import Path
+
 from app.pipeline.classify import ClassifyResult
 from app.pipeline.confidence import confidence_label
-from app.pipeline.verify import VerifyResult
+from app.pipeline.verify import T3aResult, VerifyResult
 
 _VERDICT_LABELS = {
     "true": "True",
@@ -8,6 +10,12 @@ _VERDICT_LABELS = {
     "misleading": "Misleading",
     "unverifiable": "Unverifiable",
 }
+
+# This is the literal reply text, not an LLM prompt -- T3b is a hard stop that
+# must never involve model-generated content. Kept as a text file anyway,
+# matching every other message in prompts/, since it's exactly the kind of
+# text a team would want to review or localize without touching code.
+_T3B_MESSAGE = (Path(__file__).parent.parent / "prompts" / "refuse_t3b.txt").read_text(encoding="utf-8").strip()
 
 
 def compose_not_a_claim_reply() -> str:
@@ -69,14 +77,51 @@ def compose_t2_reply(classify: ClassifyResult, verify: VerifyResult, frequently_
     return "\n".join(lines)
 
 
-def compose_cached_reply(row: dict, frequently_forwarded: bool) -> str:
-    """Same shape as compose_t1_reply/compose_t2_reply, built from a claims row
-    read back from the cache. Only an English explanation is stored (matches
-    the committed schema), so cache hits reply in English even when the
-    original forward wasn't -- fresh replies stay bilingual. Worth reconciling
-    later if it proves confusing in practice.
+def compose_t3a_reply(t3a: T3aResult, frequently_forwarded: bool) -> str:
+    """Deliberately shaped nothing like compose_t1/t2_reply -- no verdict header,
+    no confidence line -- so it visibly reads as general guidance, not a verdict.
     """
-    verdict_label = _VERDICT_LABELS.get(row.get("verdict", ""), row.get("verdict", ""))
+    lines = [t3a.guidance_original_language or t3a.guidance_english]
+    if frequently_forwarded:
+        lines.append("")
+        lines.append("This message has been forwarded many times.")
+    lines.append("")
+    lines.append("— InfoBot (general guidance only, not a verdict)")
+    return "\n".join(lines)
+
+
+def compose_t3b_reply() -> str:
+    """The hard stop. Static and parameter-free on purpose -- same message every
+    time, regardless of claim text, language, or forward count. The one path in
+    this whole system that must never vary or be generated.
+    """
+    return _T3B_MESSAGE
+
+
+def _compose_guidance_from_row(row: dict, frequently_forwarded: bool) -> str:
+    lines = [row.get("explanation_en") or ""]
+    if frequently_forwarded:
+        lines.append("")
+        lines.append("This message has been forwarded many times.")
+    lines.append("")
+    lines.append("— InfoBot (general guidance only, not a verdict)")
+    return "\n".join(lines)
+
+
+def compose_cached_reply(row: dict, frequently_forwarded: bool) -> str:
+    """Built from a claims row read back from the cache. Only an English
+    explanation is stored (matches the committed schema), so cache hits reply
+    in English even when the original forward wasn't -- fresh replies stay
+    bilingual. Worth reconciling later if it proves confusing in practice.
+    """
+    verdict = row.get("verdict", "")
+
+    if verdict == "refused":
+        return compose_t3b_reply()
+    if verdict == "guidance":
+        return _compose_guidance_from_row(row, frequently_forwarded)
+
+    verdict_label = _VERDICT_LABELS.get(verdict, verdict)
     lines = [f"\U0001f50d Verdict: {verdict_label}"]
     label = confidence_label(row.get("confidence"))
     if label:

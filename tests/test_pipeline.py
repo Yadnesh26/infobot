@@ -1,7 +1,7 @@
 import pytest
 
 from app.pipeline import classify, verify
-from app.pipeline.compose import compose_t1_reply, compose_t2_reply
+from app.pipeline.compose import compose_cached_reply, compose_t1_reply, compose_t2_reply, compose_t3a_reply, compose_t3b_reply
 from app.pipeline.confidence import confidence_label
 from app.pipeline.orchestrator import run_text_pipeline
 
@@ -184,7 +184,11 @@ async def test_orchestrator_short_circuits_non_claims(monkeypatch):
 
 
 @pytest.mark.anyio
-async def test_orchestrator_returns_stub_for_unsupported_tiers(monkeypatch):
+async def test_orchestrator_returns_stub_for_out_of_schema_tier(monkeypatch):
+    """All four real tiers (t1/t2/t3a/t3b) are handled -- this only covers the
+    defensive fallback if the model ever returns something outside its own
+    JSON schema enum, which structured output should prevent but isn't
+    provably impossible."""
     _stub_cache_miss(monkeypatch)
 
     async def fake_generate_json(prompt, schema, thinking_level="low"):
@@ -193,14 +197,14 @@ async def test_orchestrator_returns_stub_for_unsupported_tiers(monkeypatch):
             "is_verifiable_claim": True,
             "claim_original": "x",
             "claim_english": "x",
-            "tier": "t3b",
+            "tier": "bogus",
             "domain": "health",
         }
 
     monkeypatch.setattr("app.pipeline.classify.generate_json", fake_generate_json)
 
-    result = await run_text_pipeline("some dosage question", frequently_forwarded=False)
-    assert "t3b" in result.reply_text
+    result = await run_text_pipeline("some claim", frequently_forwarded=False)
+    assert "bogus" in result.reply_text
     assert "doesn't support yet" in result.reply_text
     assert result.pending_claim_write is None
 
@@ -454,3 +458,150 @@ async def test_orchestrator_does_not_cache_unverifiable_t2_result(monkeypatch):
 
     result = await run_text_pipeline("an obscure claim", frequently_forwarded=False)
     assert result.pending_claim_write is None
+
+
+# --- T3a (soft guidance) / T3b (hard stop) ---
+
+
+@pytest.mark.anyio
+async def test_verify_t3a_returns_guidance_when_not_escalated(monkeypatch):
+    async def fake_generate_json(prompt, schema, thinking_level="low"):
+        return {
+            "needs_escalation": False,
+            "guidance_english": "Eating curd at night is a common belief with mixed evidence. Consult a doctor if concerned.",
+            "guidance_original_language": "",
+        }
+
+    monkeypatch.setattr("app.pipeline.verify.generate_json", fake_generate_json)
+
+    result = await verify.verify_t3a("claim", "claim", "en")
+    assert result.needs_escalation is False
+    assert "curd" in result.guidance_english
+
+
+@pytest.mark.anyio
+async def test_verify_t3a_flags_escalation(monkeypatch):
+    async def fake_generate_json(prompt, schema, thinking_level="low"):
+        return {"needs_escalation": True, "guidance_english": "", "guidance_original_language": ""}
+
+    monkeypatch.setattr("app.pipeline.verify.generate_json", fake_generate_json)
+
+    result = await verify.verify_t3a("claim", "claim", "en")
+    assert result.needs_escalation is True
+
+
+def test_compose_t3a_reply_has_no_verdict_or_confidence_header():
+    t3a = verify.T3aResult(needs_escalation=False, guidance_english="general guidance text", guidance_original_language="")
+    reply = compose_t3a_reply(t3a, frequently_forwarded=False)
+    assert "Verdict:" not in reply
+    assert "Confidence:" not in reply
+    assert "general guidance text" in reply
+    assert "not a verdict" in reply
+
+
+def test_compose_t3b_reply_is_static_and_mentions_doctor_and_helpline():
+    reply = compose_t3b_reply()
+    assert "doctor" in reply.lower()
+    assert "104" in reply
+    # Called twice with no arguments -- must be byte-identical, no variation.
+    assert reply == compose_t3b_reply()
+
+
+@pytest.mark.anyio
+async def test_orchestrator_t3a_caches_as_guidance_verdict(monkeypatch):
+    _stub_cache_miss(monkeypatch)
+
+    async def fake_classify_json(prompt, schema, thinking_level="low"):
+        return {
+            "detected_language": "en",
+            "is_verifiable_claim": True,
+            "claim_original": "x",
+            "claim_english": "x",
+            "tier": "t3a",
+            "domain": "health",
+        }
+
+    async def fake_verify_json(prompt, schema, thinking_level="low"):
+        return {
+            "needs_escalation": False,
+            "guidance_english": "commonly believed, consult a doctor",
+            "guidance_original_language": "",
+        }
+
+    monkeypatch.setattr("app.pipeline.classify.generate_json", fake_classify_json)
+    monkeypatch.setattr("app.pipeline.verify.generate_json", fake_verify_json)
+
+    result = await run_text_pipeline("some folk belief", frequently_forwarded=False)
+    assert "Verdict:" not in result.reply_text
+    assert result.pending_claim_write is not None
+    assert result.pending_claim_write["tier"] == "t3a"
+    assert result.pending_claim_write["verdict"] == "guidance"
+    assert result.pending_claim_write["confidence"] is None
+
+
+@pytest.mark.anyio
+async def test_orchestrator_t3a_escalates_to_t3b_hard_stop(monkeypatch):
+    """The runtime self-test: even a claim classified t3a upfront must fall
+    through to the exact same static hard stop if verification decides the
+    answer actually depends on the person."""
+    _stub_cache_miss(monkeypatch)
+
+    async def fake_classify_json(prompt, schema, thinking_level="low"):
+        return {
+            "detected_language": "en",
+            "is_verifiable_claim": True,
+            "claim_original": "x",
+            "claim_english": "x",
+            "tier": "t3a",
+            "domain": "health",
+        }
+
+    async def fake_verify_json(prompt, schema, thinking_level="low"):
+        return {"needs_escalation": True, "guidance_english": "", "guidance_original_language": ""}
+
+    monkeypatch.setattr("app.pipeline.classify.generate_json", fake_classify_json)
+    monkeypatch.setattr("app.pipeline.verify.generate_json", fake_verify_json)
+
+    result = await run_text_pipeline("actually needs personal medical advice", frequently_forwarded=False)
+    assert result.reply_text == compose_t3b_reply()
+    assert result.pending_claim_write["tier"] == "t3b"
+    assert result.pending_claim_write["verdict"] == "refused"
+
+
+@pytest.mark.anyio
+async def test_orchestrator_t3b_never_calls_any_verify_llm(monkeypatch):
+    """A direct t3b classification must reach the static hard stop without any
+    LLM call generating the reply content -- the one path that must never vary."""
+    _stub_cache_miss(monkeypatch)
+
+    async def fake_classify_json(prompt, schema, thinking_level="low"):
+        return {
+            "detected_language": "en",
+            "is_verifiable_claim": True,
+            "claim_original": "x",
+            "claim_english": "x",
+            "tier": "t3b",
+            "domain": "health",
+        }
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("no verify-stage LLM call should happen for a direct t3b classification")
+
+    monkeypatch.setattr("app.pipeline.classify.generate_json", fake_classify_json)
+    monkeypatch.setattr("app.pipeline.verify.generate_json", fail_if_called)
+
+    result = await run_text_pipeline("a dosage question", frequently_forwarded=False)
+    assert result.reply_text == compose_t3b_reply()
+    assert result.pending_claim_write["verdict"] == "refused"
+
+
+def test_compose_cached_reply_renders_refused_as_static_hard_stop():
+    row = {"verdict": "refused", "confidence": None, "explanation_en": "", "sources": []}
+    assert compose_cached_reply(row, frequently_forwarded=False) == compose_t3b_reply()
+
+
+def test_compose_cached_reply_renders_guidance_without_verdict_header():
+    row = {"verdict": "guidance", "confidence": None, "explanation_en": "general guidance text", "sources": []}
+    reply = compose_cached_reply(row, frequently_forwarded=False)
+    assert "Verdict:" not in reply
+    assert "general guidance text" in reply

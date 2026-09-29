@@ -621,13 +621,15 @@ Collect 40–60 actual forwards. Skew toward what will actually arrive:
 - Dosage/treatment questions → **must** land t3b
 - Non-claims (greetings, jokes) → should short-circuit
 
+A first, text-only slice of this lives at `tests/fixtures/tier_fixtures.json` (15 cases), run via `scripts/run_tier_fixtures.py` against the live classifier — not part of the pytest suite, since it costs real quota. At M5, all 15 passed, including every dosage/drug-interaction/urgent-symptom case landing t3b (with a Hinglish variant), both true and false T1 claims correctly distinguished, and both greetings short-circuiting. Extend this fixture file as image/audio input types land in M6/M7, per the full 40–60 target above.
+
 ### 14.2 What to measure
 
 | Metric | Target |
 |---|---|
 | Tier classification accuracy | Highest priority. A t3b misrouted to t3a is the only genuinely dangerous failure in this system |
 | OCR usable-text rate | On real degraded screenshots, not clean images — clean images fail to discriminate |
-| Marathi transcription WER | Expect worse than Hindi. Decides whether Bhashini stays primary |
+| Marathi transcription WER | Expect worse than Hindi. Decides whether ElevenLabs Scribe stays primary |
 | Semantic cache precision | Manually review every hit. A wrong-claim hit serves a wrong verdict |
 | End-to-end latency | Text < 8s, image < 15s, audio < 30s |
 
