@@ -20,7 +20,7 @@ _SCHEMA = {
 @dataclass
 class VerifyResult:
     verdict: str
-    confidence: str | None
+    confidence: int | None  # 0-100, matches the claims.confidence schema column
     explanation_english: str
     explanation_original_language: str
 
@@ -37,9 +37,10 @@ async def verify_t1(claim_english: str, claim_original: str, detected_language: 
     if verdict == "unverifiable":
         confidence = None
     else:
-        # Structural cap, not self-reported: Tier 1 has no retrieval, so it never
-        # reaches "High" no matter how certain the model claims to be.
-        confidence = "Medium" if data.get("model_is_confident") else "Low"
+        # Structural cap, not self-reported: Tier 1 has no retrieval, so its
+        # numeric confidence is pinned well below the "High" bucket (>=70)
+        # regardless of how certain the model claims to be.
+        confidence = 60 if data.get("model_is_confident") else 25
 
     explanation_english = data.get("explanation_english", "")
     return VerifyResult(

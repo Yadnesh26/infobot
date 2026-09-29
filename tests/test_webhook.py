@@ -64,25 +64,38 @@ def test_post_webhook_rejects_bad_signature():
     assert resp.status_code == 403
 
 
-def test_post_webhook_accepts_valid_signature_and_acks_fast(monkeypatch):
-    sent = {}
+def _patch_common(monkeypatch, sent, *, is_new=True):
+    from app.pipeline.orchestrator import PipelineResult
 
     async def fake_mark_read(wamid):
         return None
 
     async def fake_send_text_reply(to, body, reply_to_wamid):
-        sent["to"] = to
-        sent["body"] = body
-        sent["reply_to_wamid"] = reply_to_wamid
+        sent.setdefault("send_calls", []).append(
+            {"to": to, "body": body, "reply_to_wamid": reply_to_wamid}
+        )
         return {"messages": [{"id": "wamid.REPLY"}]}
 
     async def fake_run_text_pipeline(raw_text, frequently_forwarded):
         sent["pipeline_input"] = raw_text
-        return "FAKE VERDICT REPLY"
+        return PipelineResult("FAKE VERDICT REPLY")
+
+    async def fake_claim_submission(**kwargs):
+        return is_new
+
+    async def fake_mark_submission(*args, **kwargs):
+        sent["marked_status"] = args[1] if len(args) > 1 else kwargs.get("status")
 
     monkeypatch.setattr("app.main.mark_read", fake_mark_read)
     monkeypatch.setattr("app.main.send_text_reply", fake_send_text_reply)
     monkeypatch.setattr("app.main.run_text_pipeline", fake_run_text_pipeline)
+    monkeypatch.setattr("app.main.db_submissions.claim_submission", fake_claim_submission)
+    monkeypatch.setattr("app.main.db_submissions.mark_submission", fake_mark_submission)
+
+
+def test_post_webhook_accepts_valid_signature_and_acks_fast(monkeypatch):
+    sent = {}
+    _patch_common(monkeypatch, sent, is_new=True)
 
     body = FIXTURE.read_bytes()
     resp = client.post(
@@ -91,6 +104,22 @@ def test_post_webhook_accepts_valid_signature_and_acks_fast(monkeypatch):
         headers={"X-Hub-Signature-256": _sign(body), "Content-Type": "application/json"},
     )
     assert resp.status_code == 200
-    assert sent["reply_to_wamid"] == "wamid.TEST123"
     assert sent["pipeline_input"] == "Drinking hot water cures COVID instantly"
-    assert sent["body"] == "FAKE VERDICT REPLY"
+    assert len(sent["send_calls"]) == 1
+    assert sent["send_calls"][0]["reply_to_wamid"] == "wamid.TEST123"
+    assert sent["send_calls"][0]["body"] == "FAKE VERDICT REPLY"
+    assert sent["marked_status"] == "done"
+
+
+def test_post_webhook_drops_duplicate_delivery(monkeypatch):
+    sent = {}
+    _patch_common(monkeypatch, sent, is_new=False)
+
+    body = FIXTURE.read_bytes()
+    resp = client.post(
+        "/webhook",
+        content=body,
+        headers={"X-Hub-Signature-256": _sign(body), "Content-Type": "application/json"},
+    )
+    assert resp.status_code == 200
+    assert "send_calls" not in sent  # claim_submission said "not new" -> no reply sent

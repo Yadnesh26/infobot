@@ -58,6 +58,21 @@ async def generate_json(prompt: str, schema: dict, thinking_level: str = "low") 
     raise GeminiError(f"Gemini call failed after retries: {last_error}")
 
 
+async def embed_text(text: str, output_dimensionality: int = 768) -> list[float]:
+    async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+        resp = await client.post(
+            f"{_API_BASE}/models/{settings.GEMINI_EMBED_MODEL}:embedContent",
+            params={"key": settings.GEMINI_API_KEY},
+            json={
+                "content": {"parts": [{"text": text}]},
+                "outputDimensionality": output_dimensionality,
+            },
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    return data["embedding"]["values"]
+
+
 async def _call_interactions(body: dict) -> str:
     async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
         resp = await client.post(
