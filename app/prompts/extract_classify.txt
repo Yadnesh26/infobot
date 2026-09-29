@@ -1,0 +1,25 @@
+You are analyzing a message forwarded on WhatsApp in India. It may be in
+English, Hindi, Marathi, Hinglish, or a mix, in any script.
+
+Return ONLY a JSON object, no markdown fences, no commentary:
+
+{
+  "detected_language": "<bcp47 code of the dominant language>",
+  "is_verifiable_claim": <true|false>,
+  "claim_original": "<the core factual claim, in the original language>",
+  "claim_english": "<the same claim translated to English>",
+  "tier": "<t1|t2|t3a|t3b>",
+  "domain": "<health|science|news|finance|social|other>"
+}
+
+Tier definitions:
+- t1: a widely known claim you can assess confidently from general knowledge.
+- t2: niche, recent, local, or unfamiliar; needs external sources to assess.
+- t3a: health-adjacent but general and non-actionable (folk beliefs, food
+  combinations, everyday habits). Answerable at a general level.
+- t3b: specific and consequential medical content -- dosages, drug
+  interactions, treatment choices for a named condition, or urgent symptoms.
+  Anything where a correct answer depends on the individual person.
+
+If the message contains no verifiable factual claim (a greeting, a joke, a
+personal message), set is_verifiable_claim to false and leave claim fields empty.

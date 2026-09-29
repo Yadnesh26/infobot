@@ -5,6 +5,7 @@ from fastapi import BackgroundTasks, FastAPI, Request, Response
 from fastapi.responses import PlainTextResponse
 
 from app.config import settings
+from app.pipeline.orchestrator import run_text_pipeline
 from app.whatsapp.client import mark_read, send_text_reply
 from app.whatsapp.parser import InboundMessage, extract_messages
 from app.whatsapp.verify import valid_signature
@@ -67,8 +68,7 @@ async def handle_message(msg: InboundMessage) -> None:
 
         await mark_read(msg.wamid)
 
-        # M1 (Echo): no AI pipeline yet. Just quote the original text back.
-        reply_text = _compose_echo_reply(msg)
+        reply_text = await _compose_reply(msg)
         await send_text_reply(to=msg.sender, body=reply_text, reply_to_wamid=msg.wamid)
 
     except Exception:
@@ -83,10 +83,10 @@ async def handle_message(msg: InboundMessage) -> None:
             logger.exception("Failed to send apology reply for wamid=%s", msg.wamid)
 
 
-def _compose_echo_reply(msg: InboundMessage) -> str:
+async def _compose_reply(msg: InboundMessage) -> str:
     if msg.type == "text" and msg.text:
-        return f"Got it — you sent:\n\n\"{msg.text}\"\n\n(Verification pipeline not wired up yet.)"
+        return await run_text_pipeline(msg.text, msg.frequently_forwarded)
     if msg.type in ("image", "audio", "video"):
         extra = f" Caption: \"{msg.caption}\"" if msg.caption else ""
-        return f"Got your {msg.type}.{extra} (Media handling not wired up yet.)"
-    return "Got your message. (Verification pipeline not wired up yet.)"
+        return f"Got your {msg.type}.{extra} (Media verification not wired up yet -- text-only for now.)"
+    return "Got your message, but I couldn't find any text to check."

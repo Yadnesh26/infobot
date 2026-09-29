@@ -76,8 +76,13 @@ def test_post_webhook_accepts_valid_signature_and_acks_fast(monkeypatch):
         sent["reply_to_wamid"] = reply_to_wamid
         return {"messages": [{"id": "wamid.REPLY"}]}
 
+    async def fake_run_text_pipeline(raw_text, frequently_forwarded):
+        sent["pipeline_input"] = raw_text
+        return "FAKE VERDICT REPLY"
+
     monkeypatch.setattr("app.main.mark_read", fake_mark_read)
     monkeypatch.setattr("app.main.send_text_reply", fake_send_text_reply)
+    monkeypatch.setattr("app.main.run_text_pipeline", fake_run_text_pipeline)
 
     body = FIXTURE.read_bytes()
     resp = client.post(
@@ -87,4 +92,5 @@ def test_post_webhook_accepts_valid_signature_and_acks_fast(monkeypatch):
     )
     assert resp.status_code == 200
     assert sent["reply_to_wamid"] == "wamid.TEST123"
-    assert "Drinking hot water cures COVID instantly" in sent["body"]
+    assert sent["pipeline_input"] == "Drinking hot water cures COVID instantly"
+    assert sent["body"] == "FAKE VERDICT REPLY"

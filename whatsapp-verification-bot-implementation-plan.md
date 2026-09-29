@@ -14,7 +14,8 @@ A forward-and-verify WhatsApp bot. User forwards any suspicious message (text, i
 | Web framework | FastAPI + Uvicorn | Async-native, needed for fast webhook ack |
 | Background jobs | FastAPI `BackgroundTasks` for MVP | Zero infra; upgrade to a real queue only if it becomes a bottleneck |
 | Deployment | Render / Railway / Fly.io free tier | Needs a persistent HTTPS process, not just serverless functions |
-| Embedding model | Gemini embedding model | Same provider as everything else; confirm exact model ID + dimensions in AI Studio at setup time |
+| Embedding model | `gemini-embedding-001`, truncated to 768 dims via `output_dimensionality` | Matches the `vector(768)` already committed in the Phase 3 schema — no migration needed |
+| Text reasoning model | `gemini-3.1-flash-lite` (pinned, not a `-latest` alias), via the newer Interactions API (`/v1beta/interactions`, not `generateContent`) | The flagship `gemini-3.8-flash` measured at only 20 requests/day on this account's Free Tier — unusable for iterative dev, let alone production. Flash-lite has a separate, much larger free quota and is plenty capable for structured extraction/classification/verdict JSON. Re-check both models' actual limits in AI Studio's rate-limit dashboard before scaling past dev |
 
 **Locked in from earlier decisions:**
 
