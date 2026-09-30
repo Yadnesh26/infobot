@@ -98,7 +98,11 @@ async def handle_message(msg: InboundMessage) -> None:
             await db_submissions.mark_submission(msg.wamid, "rate_limited")
             return
 
-        await mark_read(msg.wamid)
+        # A read receipt is a courtesy -- if it fails, the user still deserves their answer.
+        try:
+            await mark_read(msg.wamid)
+        except Exception:
+            logger.warning("mark_read failed for wamid=%s, continuing", msg.wamid, exc_info=True)
 
         reply_text, pending_write, cache_hit = await _compose_reply(msg)
         send_result = await send_text_reply(to=msg.sender, body=reply_text, reply_to_wamid=msg.wamid)

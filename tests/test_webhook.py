@@ -156,6 +156,29 @@ def test_post_webhook_accepts_valid_signature_and_acks_fast(monkeypatch):
     assert sent["marked_status"] == "done"
 
 
+def test_post_webhook_still_replies_when_mark_read_fails(monkeypatch):
+    """Regression: a failing read receipt used to abort the whole request,
+    costing the user their answer over a purely cosmetic call."""
+    sent = {}
+    _patch_common(monkeypatch, sent, is_new=True)
+
+    async def failing_mark_read(wamid):
+        raise RuntimeError("meta returned 400")
+
+    monkeypatch.setattr("app.main.mark_read", failing_mark_read)
+
+    body = FIXTURE.read_bytes()
+    resp = client.post(
+        "/webhook",
+        content=body,
+        headers={"X-Hub-Signature-256": _sign(body), "Content-Type": "application/json"},
+    )
+    assert resp.status_code == 200
+    assert len(sent["send_calls"]) == 1
+    assert sent["send_calls"][0]["body"] == "FAKE VERDICT REPLY"
+    assert sent["marked_status"] == "done"
+
+
 def test_post_webhook_drops_duplicate_delivery(monkeypatch):
     sent = {}
     _patch_common(monkeypatch, sent, is_new=False)
