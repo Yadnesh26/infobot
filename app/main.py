@@ -14,7 +14,7 @@ from app.db import trending as db_trending
 from app.pipeline.normalize import AudioTooLongError, extract_audio_track, normalize_audio, normalize_image
 from app.pipeline.orchestrator import run_text_pipeline
 from app.providers.gemini import GeminiError
-from app.util import hash_phone
+from app.util import hash_phone, ref
 from app.whatsapp.client import download_media, mark_read, send_text_reply
 from app.whatsapp.parser import InboundMessage, extract_messages
 from app.whatsapp.verify import valid_signature
@@ -92,7 +92,7 @@ async def handle_message(msg: InboundMessage) -> None:
             frequently_forwarded=msg.frequently_forwarded,
         )
         if not is_new:
-            logger.info("Dropping duplicate delivery of %s", msg.wamid)
+            logger.info("Dropping duplicate delivery of %s", ref(msg.wamid))
             return
 
         # Cap per-user throughput before spending anything on the pipeline --
@@ -100,7 +100,7 @@ async def handle_message(msg: InboundMessage) -> None:
         # daily Gemini/ElevenLabs/Tavily quota for everyone else.
         under_limit = await db_rate_limit.check_and_increment(wa_user_hash)
         if not under_limit:
-            logger.info("Rate limit exceeded for wamid=%s", msg.wamid)
+            logger.info("Rate limit exceeded for wamid=%s", ref(msg.wamid))
             await send_text_reply(
                 to=msg.sender,
                 body="You've sent quite a few messages in the last hour -- please wait a bit before sending more.",
@@ -113,7 +113,7 @@ async def handle_message(msg: InboundMessage) -> None:
         try:
             await mark_read(msg.wamid)
         except Exception:
-            logger.warning("mark_read failed for wamid=%s, continuing", msg.wamid, exc_info=True)
+            logger.warning("mark_read failed for wamid=%s, continuing", ref(msg.wamid), exc_info=True)
 
         reply_text, pending_write, cache_hit = await _compose_reply(msg)
         send_result = await send_text_reply(to=msg.sender, body=reply_text, reply_to_wamid=msg.wamid)
@@ -124,26 +124,26 @@ async def handle_message(msg: InboundMessage) -> None:
             try:
                 await db_cache.insert_claim(pending_write)
             except Exception:
-                logger.exception("Cache write failed after successful send for wamid=%s", msg.wamid)
+                logger.exception("Cache write failed after successful send for wamid=%s", ref(msg.wamid))
 
         try:
             reply_wamid = send_result.get("messages", [{}])[0].get("id")
             if reply_wamid:
                 await db_submissions.set_reply_wamid(msg.wamid, reply_wamid)
         except Exception:
-            logger.exception("Failed to store reply_wamid for wamid=%s", msg.wamid)
+            logger.exception("Failed to store reply_wamid for wamid=%s", ref(msg.wamid))
 
         try:
             await db_submissions.mark_submission(msg.wamid, "done", cache_hit=cache_hit)
         except Exception:
-            logger.exception("Failed to mark submission done for wamid=%s", msg.wamid)
+            logger.exception("Failed to mark submission done for wamid=%s", ref(msg.wamid))
 
     except Exception as exc:
-        logger.exception("Pipeline failed for wamid=%s", msg.wamid)
+        logger.exception("Pipeline failed for wamid=%s", ref(msg.wamid))
         try:
             await db_submissions.mark_submission(msg.wamid, "error", error=str(exc))
         except Exception:
-            logger.exception("Failed to mark submission error for wamid=%s", msg.wamid)
+            logger.exception("Failed to mark submission error for wamid=%s", ref(msg.wamid))
         try:
             await send_text_reply(
                 to=msg.sender,
@@ -151,7 +151,7 @@ async def handle_message(msg: InboundMessage) -> None:
                 reply_to_wamid=msg.wamid,
             )
         except Exception:
-            logger.exception("Failed to send apology reply for wamid=%s", msg.wamid)
+            logger.exception("Failed to send apology reply for wamid=%s", ref(msg.wamid))
 
 
 async def _compose_reply(msg: InboundMessage) -> tuple[str, dict | None, str | None]:
@@ -175,7 +175,7 @@ async def _compose_image_reply(msg: InboundMessage) -> tuple[str, dict | None, s
     try:
         image_bytes = await download_media(msg.media_id)
     except Exception:
-        logger.exception("Failed to download image for wamid=%s", msg.wamid)
+        logger.exception("Failed to download image for wamid=%s", ref(msg.wamid))
         return "I couldn't download that image -- could you try resending it?", None, None
 
     mime_type = msg.media_mime_type or "image/jpeg"
@@ -184,7 +184,7 @@ async def _compose_image_reply(msg: InboundMessage) -> tuple[str, dict | None, s
     except GeminiError:
         # Vision has no fallback provider, so say so honestly and offer the
         # one thing that does work right now.
-        logger.exception("Image reading failed for wamid=%s", msg.wamid)
+        logger.exception("Image reading failed for wamid=%s", ref(msg.wamid))
         return (
             "I can't read images right now. If you can type out or paste the text "
             "from the image, I can check that instead.",
@@ -211,14 +211,14 @@ async def _compose_audio_or_video_reply(msg: InboundMessage) -> tuple[str, dict 
     try:
         media_bytes = await download_media(msg.media_id)
     except Exception:
-        logger.exception("Failed to download %s for wamid=%s", msg.type, msg.wamid)
+        logger.exception("Failed to download %s for wamid=%s", msg.type, ref(msg.wamid))
         return f"I couldn't download that {msg.type} -- could you try resending it?", None, None
 
     if msg.type == "video":
         try:
             audio_bytes = await extract_audio_track(media_bytes, msg.media_mime_type)
         except Exception:
-            logger.exception("Failed to extract audio from video for wamid=%s", msg.wamid)
+            logger.exception("Failed to extract audio from video for wamid=%s", ref(msg.wamid))
             return "I couldn't process the audio in that video -- could you try resending it?", None, None
         audio_mime_type = "audio/wav"
     else:
@@ -230,7 +230,7 @@ async def _compose_audio_or_video_reply(msg: InboundMessage) -> tuple[str, dict 
     except AudioTooLongError as exc:
         minutes = settings.MAX_AUDIO_SECONDS // 60
         logger.info(
-            "Rejecting %s from wamid=%s: %.0fs exceeds cap", msg.type, msg.wamid, exc.duration_seconds
+            "Rejecting %s from wamid=%s: %.0fs exceeds cap", msg.type, ref(msg.wamid), exc.duration_seconds
         )
         return (
             f"That {msg.type} is too long to check (over {minutes} minutes). "
@@ -267,9 +267,9 @@ async def _handle_reaction(msg: InboundMessage) -> None:
         if submission_id is None:
             logger.info(
                 "Reaction %s on unknown reply %s -- probably reacting to something other than our own reply",
-                msg.reaction_emoji, msg.reaction_target_wamid,
+                msg.reaction_emoji, ref(msg.reaction_target_wamid),
             )
             return
         await db_feedback.insert_feedback(submission_id, msg.reaction_target_wamid, msg.reaction_emoji)
     except Exception:
-        logger.exception("Failed to record reaction feedback for wamid=%s", msg.wamid)
+        logger.exception("Failed to record reaction feedback for wamid=%s", ref(msg.wamid))
