@@ -446,3 +446,25 @@ def test_trending_endpoint_returns_data_from_db(monkeypatch):
     resp = client.get("/trending")
     assert resp.status_code == 200
     assert resp.json()[0]["claim_text_en"] == "x"
+
+
+@pytest.mark.anyio
+async def test_compose_image_reply_asks_for_text_when_vision_is_down(monkeypatch):
+    from app.providers.gemini import GeminiError
+
+    async def fake_download_media(media_id):
+        return b"fake-image-bytes"
+
+    async def vision_down(image_bytes, mime_type, caption):
+        raise GeminiError("gemini down, and images have no fallback")
+
+    monkeypatch.setattr("app.main.download_media", fake_download_media)
+    monkeypatch.setattr("app.main.normalize_image", vision_down)
+
+    msg = InboundMessage(
+        wamid="wamid.IMG9", sender="919876543210", type="image",
+        media_id="media123", media_mime_type="image/jpeg", caption=None,
+    )
+    reply_text, pending_write, cache_hit = await _compose_image_reply(msg)
+    assert "can't read images right now" in reply_text
+    assert pending_write is None

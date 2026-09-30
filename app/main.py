@@ -1,5 +1,6 @@
 import json
 import logging
+from contextlib import asynccontextmanager
 
 from fastapi import BackgroundTasks, FastAPI, Request, Response
 from fastapi.responses import PlainTextResponse
@@ -12,6 +13,7 @@ from app.db import submissions as db_submissions
 from app.db import trending as db_trending
 from app.pipeline.normalize import AudioTooLongError, extract_audio_track, normalize_audio, normalize_image
 from app.pipeline.orchestrator import run_text_pipeline
+from app.providers.gemini import GeminiError
 from app.util import hash_phone
 from app.whatsapp.client import download_media, mark_read, send_text_reply
 from app.whatsapp.parser import InboundMessage, extract_messages
@@ -20,7 +22,16 @@ from app.whatsapp.verify import valid_signature
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("infobot")
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    try:
+        await db_submissions.abandon_stale_pending()
+    except Exception:
+        logger.exception("Startup sweep of stale pending submissions failed")
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
 
 
 @app.get("/health")
@@ -168,7 +179,18 @@ async def _compose_image_reply(msg: InboundMessage) -> tuple[str, dict | None, s
         return "I couldn't download that image -- could you try resending it?", None, None
 
     mime_type = msg.media_mime_type or "image/jpeg"
-    extracted_text = await normalize_image(image_bytes, mime_type, msg.caption)
+    try:
+        extracted_text = await normalize_image(image_bytes, mime_type, msg.caption)
+    except GeminiError:
+        # Vision has no fallback provider, so say so honestly and offer the
+        # one thing that does work right now.
+        logger.exception("Image reading failed for wamid=%s", msg.wamid)
+        return (
+            "I can't read images right now. If you can type out or paste the text "
+            "from the image, I can check that instead.",
+            None,
+            None,
+        )
 
     if extracted_text is None:
         return (

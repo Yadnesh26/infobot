@@ -19,6 +19,8 @@ class Settings(BaseSettings):
     TAVILY_API_KEY: str = ""
 
     GROQ_API_KEY: str = ""
+    GROQ_MODEL: str = "openai/gpt-oss-120b"
+    GROQ_WHISPER_MODEL: str = "whisper-large-v3"
     OPENROUTER_API_KEY: str = ""
     OPENAI_API_KEY: str = ""
 

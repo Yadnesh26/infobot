@@ -6,11 +6,13 @@ import logging
 import httpx
 
 from app.config import settings
+from app.providers import fallback_llm
 
 logger = logging.getLogger("infobot.gemini")
 
 _API_BASE = "https://generativelanguage.googleapis.com/v1beta"
 _TIMEOUT = 30  # seconds, per the plan's resilience section
+_RETRY_BACKOFF_SECONDS = 2  # brief pause before the one retry (transient 429/503)
 
 
 class GeminiError(Exception):
@@ -56,7 +58,7 @@ async def generate_json(input_data: str | list, schema: dict, thinking_level: st
             last_error = exc
             logger.warning("Gemini call failed (attempt %d): %s", attempt + 1, exc)
             if attempt == 0:
-                await asyncio.sleep(2)  # brief backoff before the one retry (transient 429/503)
+                await asyncio.sleep(_RETRY_BACKOFF_SECONDS)
             continue
 
         try:
@@ -68,7 +70,17 @@ async def generate_json(input_data: str | list, schema: dict, thinking_level: st
             )
             continue
 
-    raise GeminiError(f"Gemini call failed after retries: {last_error}")
+    # Gemini is out of quota or down. Text-only calls can fall back to Groq;
+    # image calls cannot (no vision fallback), so they fail and the caller
+    # asks the user for the text version instead.
+    if isinstance(input_data, str):
+        logger.warning("Gemini failed after retries (%r); falling back to Groq", last_error)
+        try:
+            return await fallback_llm.generate_json(input_data, schema)
+        except Exception as exc:
+            raise GeminiError(f"Gemini and Groq fallback both failed: gemini={last_error!r} groq={exc!r}")
+
+    raise GeminiError(f"Gemini call failed after retries: {last_error!r}")
 
 
 async def embed_text(text: str, output_dimensionality: int = 768) -> list[float]:

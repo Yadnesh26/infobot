@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta, timezone
+
 from app.db import client as db
 
 
@@ -46,3 +48,19 @@ async def find_submission_id_by_reply_wamid(reply_wamid: str) -> str | None:
         "submissions", {"reply_wamid": f"eq.{reply_wamid}", "select": "id", "limit": "1"}
     )
     return rows[0]["id"] if rows else None
+
+
+async def abandon_stale_pending(older_than_minutes: int = 10) -> None:
+    """Mark submissions stuck at 'pending' as abandoned.
+
+    A background job lives only in process memory, so a restart or crash
+    mid-job leaves its row pending forever. We can't re-run it or apologise to
+    the user -- by design we keep only a hash of their number and never the
+    message -- so the honest fix is to stop the row looking in-progress.
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=older_than_minutes)).isoformat()
+    await db.patch(
+        "submissions",
+        {"status": "eq.pending", "created_at": f"lt.{cutoff}"},
+        {"status": "abandoned", "error": "job lost before completion (process restart or crash)"},
+    )

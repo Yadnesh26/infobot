@@ -389,7 +389,7 @@ Once you have `raw_text` (OCR'd text plus caption, joined), hand it straight to 
 
 Cap duration (e.g. 3 minutes) — this also caps per-message ElevenLabs cost, not just latency. A 40-minute forwarded audio file is a cost and latency problem with no upside. Check the duration via `ffprobe` *before* calling ElevenLabs at all, not after — the cap exists specifically to bound spend, so it has to gate the paid call, not just log a warning alongside it.
 
-The Whisper fallback here is the OpenAI API (`OPENAI_API_KEY`), not self-hosted IndicConformer — that stays unimplemented for now. If both `ELEVENLABS_API_KEY` transcription and `OPENAI_API_KEY` are unset or failing, the fallback chain has no floor and every audio/video message gets the honest failure reply. Fine while `OPENAI_API_KEY` is optional/unset in dev; revisit before relying on this in front of real users.
+The Whisper fallback is Groq's hosted `whisper-large-v3` (same free `GROQ_API_KEY` as the text fallback; OpenAI's `whisper-1` is used only if `GROQ_API_KEY` is absent and `OPENAI_API_KEY` is set). Self-hosted IndicConformer stays unimplemented. If ElevenLabs and Groq both fail or are unconfigured, the user gets the honest failure reply. Whisper's Marathi accuracy is unmeasured — benchmark it before trusting the fallback for Marathi voice notes.
 
 ### 7.5 Concurrency: never block the event loop
 `ffmpeg` invocation and any non-async provider SDK calls (Bhashini, some Gemini/Groq clients) are blocking. If they run inline inside an `async def` handler, they stall the entire event loop — including the webhook ACK path for *other* users' concurrent requests, silently violating the "200 in milliseconds" requirement from §6.2. Run every blocking call through `asyncio.to_thread(...)` or as a subprocess with `asyncio.create_subprocess_exec`, never as a direct synchronous call inside request-handling code.
@@ -577,7 +577,7 @@ Implemented as `GET /trending`, unauthenticated. Fine for a demo; revisit before
 
 | Failure | Response |
 |---|---|
-| Gemini quota exhausted | Route text-only reasoning to Groq (OpenRouter deferred). Vision has no fallback — reply asking for the text version |
+| Gemini quota exhausted | Route text-only reasoning to Groq (`openai/gpt-oss-120b`, OpenRouter deferred) — implemented inside `gemini.generate_json`, text input only. Vision has no fallback: the user is told images can't be read right now and asked to paste the text. Measured on the tier fixtures, Groq put all 6 dosage/interaction/urgent-symptom cases in t3b (the dangerous direction); its one miss was a folk belief classed t1 instead of t3a. Embedding failures skip the semantic cache rather than failing the request |
 | ElevenLabs fails/times out/quota exhausted | Whisper → self-hosted IndicConformer → honest failure message |
 | Search returns nothing | Return `unverifiable` with low confidence. Do not invent |
 | JSON parse failure | Retry once, then generic failure reply |
@@ -590,7 +590,9 @@ Implemented as `GET /trending`, unauthenticated. Fine for a demo; revisit before
 ### 13.1a Background job durability
 `BackgroundTasks` jobs live only in the worker process's memory. A redeploy, crash, or free-tier host recycle mid-job kills it with no exception path — the submission row is left at `status='pending'` forever, and the user gets nothing. This is a silent failure mode that the try/except in §13.1 cannot catch because the process itself is gone.
 
-Mitigation for MVP (no new infra required): add a scheduled sweep (cron, or a check on app startup) that finds `submissions` rows with `status='pending'` older than a few minutes and either re-enqueues them or sends an apology reply. This is the minimum needed to make "no path may end in silence" actually true. If job volume grows, promote this to a real queue (e.g. a Postgres-backed queue table with `FOR UPDATE SKIP LOCKED`, or Redis/RQ) rather than patching `BackgroundTasks` further.
+Mitigation for MVP (no new infra required): add a scheduled sweep (cron, or a check on app startup) that finds `submissions` rows with `status='pending'` older than a few minutes and either re-enqueues them or sends an apology reply.
+
+**Correction found while building this:** neither is possible. We deliberately store only a hash of the sender's number and never the message, so there is nothing to replay and nobody to reply to. What we can do — and do, on app startup — is mark stale `pending` rows `abandoned` so they stop looking in-progress. The user whose job was lost gets no reply; that is the real cost of the privacy design, and only a durable queue that holds the raw payload would change it (which would also change the privacy policy). This is the minimum needed to make "no path may end in silence" actually true. If job volume grows, promote this to a real queue (e.g. a Postgres-backed queue table with `FOR UPDATE SKIP LOCKED`, or Redis/RQ) rather than patching `BackgroundTasks` further.
 
 ### 13.2 Rate limiting
 Cap per-user submissions (e.g. 20/hour, keyed on hashed number). One user forwarding their whole chat history should not exhaust the daily Gemini quota for everyone.
@@ -715,6 +717,8 @@ ELEVENLABS_API_KEY=
 TAVILY_API_KEY=
 
 GROQ_API_KEY=
+GROQ_MODEL=openai/gpt-oss-120b
+GROQ_WHISPER_MODEL=whisper-large-v3
 OPENROUTER_API_KEY=
 OPENAI_API_KEY=
 

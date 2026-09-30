@@ -605,3 +605,41 @@ def test_compose_cached_reply_renders_guidance_without_verdict_header():
     reply = compose_cached_reply(row, frequently_forwarded=False)
     assert "Verdict:" not in reply
     assert "general guidance text" in reply
+
+
+@pytest.mark.anyio
+async def test_orchestrator_survives_embedding_failure(monkeypatch):
+    """Regression for resilience: the semantic cache is an optimization, so an
+    embedding failure must not fail the request -- skip the lookup, answer
+    normally, and cache by exact hash only (embedding stored as null)."""
+
+    async def fake_lookup_exact(claim_hash):
+        return None
+
+    async def failing_embed(text, output_dimensionality=768):
+        raise RuntimeError("embedding quota exhausted")
+
+    async def lookup_semantic_must_not_run(*args, **kwargs):
+        raise AssertionError("semantic lookup must be skipped without an embedding")
+
+    async def fake_classify_json(prompt, schema, thinking_level="low"):
+        return {
+            "detected_language": "en", "is_verifiable_claim": True,
+            "claim_original": "x", "claim_english": "x english", "tier": "t1", "domain": "other",
+        }
+
+    async def fake_verify_json(prompt, schema, thinking_level="low"):
+        return {
+            "verdict": "false", "model_is_confident": True,
+            "explanation_english": "nope", "explanation_original_language": "nope",
+        }
+
+    monkeypatch.setattr("app.pipeline.orchestrator.db_cache.lookup_exact", fake_lookup_exact)
+    monkeypatch.setattr("app.pipeline.orchestrator.embed_text", failing_embed)
+    monkeypatch.setattr("app.pipeline.orchestrator.db_cache.lookup_semantic", lookup_semantic_must_not_run)
+    monkeypatch.setattr("app.pipeline.classify.generate_json", fake_classify_json)
+    monkeypatch.setattr("app.pipeline.verify.generate_json", fake_verify_json)
+
+    result = await run_text_pipeline("x", frequently_forwarded=False)
+    assert "Verdict: False" in result.reply_text
+    assert result.pending_claim_write["embedding"] is None

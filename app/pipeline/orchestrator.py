@@ -1,3 +1,4 @@
+import logging
 from dataclasses import dataclass
 
 from app.config import settings
@@ -16,6 +17,8 @@ from app.pipeline.normalize import normalize_text
 from app.pipeline.verify import verify_t1, verify_t2, verify_t3a
 from app.providers.gemini import embed_text
 
+logger = logging.getLogger("infobot.pipeline")
+
 
 @dataclass
 class PipelineResult:
@@ -33,11 +36,21 @@ async def run_text_pipeline(raw_text: str, frequently_forwarded: bool) -> Pipeli
         await db_cache.increment_seen(exact["id"])
         return PipelineResult(compose_cached_reply(exact, frequently_forwarded), cache_hit="exact")
 
-    embedding = await embed_text(text)
-    semantic = await db_cache.lookup_semantic(embedding, settings.SEMANTIC_MATCH_THRESHOLD)
-    if semantic:
-        await db_cache.increment_seen(semantic["id"])
-        return PipelineResult(compose_cached_reply(semantic, frequently_forwarded), cache_hit="semantic")
+    # The semantic cache is an optimization, not a requirement: if embedding
+    # fails (Gemini quota/outage), skip it and carry on to a real check rather
+    # than failing the whole request. The claim is then cached by exact hash only.
+    embedding: list[float] | None
+    try:
+        embedding = await embed_text(text)
+    except Exception:
+        logger.warning("Embedding failed; skipping semantic cache lookup", exc_info=True)
+        embedding = None
+
+    if embedding is not None:
+        semantic = await db_cache.lookup_semantic(embedding, settings.SEMANTIC_MATCH_THRESHOLD)
+        if semantic:
+            await db_cache.increment_seen(semantic["id"])
+            return PipelineResult(compose_cached_reply(semantic, frequently_forwarded), cache_hit="semantic")
 
     classify = await extract_and_classify(text, frequently_forwarded)
 

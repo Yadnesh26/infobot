@@ -19,7 +19,18 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from app.pipeline import classify as _classify_module  # noqa: E402
 from app.pipeline.classify import extract_and_classify  # noqa: E402
+from app.providers import fallback_llm  # noqa: E402
+
+if "--groq" in sys.argv:
+    # Force the fallback provider so its safety can be measured on its own --
+    # a fallback that misroutes a dosage question would be worse than failing.
+    async def _groq_only(prompt, schema, thinking_level="low"):
+        return await fallback_llm.generate_json(prompt, schema)
+
+    _classify_module.generate_json = _groq_only
+    print("*** running the classifier on the Groq FALLBACK only ***")
 
 FIXTURE_PATH = Path(__file__).parent.parent / "tests" / "fixtures" / "tier_fixtures.json"
 DELAY_BETWEEN_CALLS = 1.5  # stay well clear of per-minute rate limits
