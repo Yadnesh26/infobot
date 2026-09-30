@@ -82,3 +82,39 @@ async def test_search_for_claim_dedupes_by_url(monkeypatch):
 
     results = await tavily.search_for_claim("claim", "claim", "en")
     assert len(results) == 1
+
+
+@pytest.mark.anyio
+async def test_general_search_excludes_social_echoes_but_factcheck_pass_does_not(monkeypatch):
+    bodies = []
+
+    class FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"results": []}
+
+    class FakeAsyncClient:
+        def __init__(self, timeout=None):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def post(self, url, headers=None, json=None):
+            bodies.append(json)
+            return FakeResponse()
+
+    monkeypatch.setattr("app.providers.tavily.httpx.AsyncClient", FakeAsyncClient)
+
+    await tavily.search("some claim")
+    await tavily.search("some claim", include_domains=["boomlive.in"])
+
+    assert "facebook.com" in bodies[0]["exclude_domains"]
+    assert "include_domains" not in bodies[0]
+    assert bodies[1]["include_domains"] == ["boomlive.in"]
+    assert "exclude_domains" not in bodies[1]

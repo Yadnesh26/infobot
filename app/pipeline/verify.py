@@ -123,17 +123,44 @@ def _derive_t2_confidence(used_sources: list[dict]) -> int | None:
     return None  # no usable sources at all
 
 
-async def verify_t2(claim_english: str, claim_original: str, detected_language: str) -> VerifyResult:
-    search_results = await search_for_claim(claim_english, claim_original, detected_language)
+_NO_SOURCES_MESSAGE = {
+    "en": "I couldn't find reliable sources to confirm or deny this claim. Please don't forward it until it has been checked.",
+    "hi": "इस दावे की पुष्टि या खंडन करने वाले भरोसेमंद स्रोत मुझे नहीं मिले। जाँच होने तक कृपया इसे आगे न भेजें।",
+    "mr": "या दाव्याची पुष्टी किंवा खंडन करणारे विश्वासार्ह स्रोत मला सापडले नाहीत. तपासणी होईपर्यंत कृपया हा संदेश पुढे पाठवू नका.",
+}
+
+
+def _no_sources_result(detected_language: str) -> "VerifyResult":
+    """A fixed, honest answer for when there is nothing to cite. Used instead of
+    whatever the model wrote: with no sources behind it, any explanation is
+    general knowledge the T2 tier forbids, and it can contradict the
+    "unverifiable" verdict it sits under."""
+    lang = (detected_language or "en").split("-")[0].lower()
+    return VerifyResult(
+        verdict="unverifiable",
+        confidence=None,
+        explanation_english=_NO_SOURCES_MESSAGE["en"],
+        explanation_original_language=_NO_SOURCES_MESSAGE.get(lang, _NO_SOURCES_MESSAGE["en"]),
+        sources=[],
+    )
+
+
+async def verify_t2(
+    claim_english: str,
+    claim_original: str,
+    detected_language: str,
+    search_query: str = "",
+    search_query_original: str = "",
+) -> VerifyResult:
+    # Search with the short queries, not the claim text: a long claim makes the
+    # search engine return copies of the rumour itself. Fall back to the claim
+    # text only if classification gave no query.
+    search_results = await search_for_claim(
+        search_query or claim_english, search_query_original or claim_original, detected_language
+    )
 
     if not search_results:
-        return VerifyResult(
-            verdict="unverifiable",
-            confidence=None,
-            explanation_english="No credible sources could be found to check this claim.",
-            explanation_original_language="No credible sources could be found to check this claim.",
-            sources=[],
-        )
+        return _no_sources_result(detected_language)
 
     results_block = "\n".join(
         f"- title: {r.get('title', '')}\n  url: {r.get('url', '')}\n  content: {r.get('content', '')[:500]}"
@@ -150,9 +177,10 @@ async def verify_t2(claim_english: str, claim_original: str, detected_language: 
     used_sources = data.get("used_sources") or []
     verdict = data.get("verdict", "unverifiable")
 
-    # Safety net: never trust a verdict the model gave with nothing behind it.
+    # Safety net: never trust a verdict -- or an explanation -- the model gave
+    # with nothing behind it.
     if not used_sources:
-        verdict = "unverifiable"
+        return _no_sources_result(detected_language)
 
     confidence = _derive_t2_confidence(used_sources) if used_sources else None
 

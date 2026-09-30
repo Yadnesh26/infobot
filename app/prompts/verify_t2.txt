@@ -24,5 +24,9 @@ Rules:
   Do not fall back on general knowledge here -- that is a different tier's job.
 - "misleading" is for claims that are technically true but presented in a way
   that implies a false conclusion.
+- A result that merely repeats or forwards the claim (a social post, a chain
+  message, a group post) is NOT evidence for or against it. Only cite results
+  that actually investigate the claim: fact-checks, news reporting, official
+  or primary sources.
 - Never cite a URL that is not present in the retrieved results below.
 - Keep the explanation factual and neutral. No moralizing, no lecturing tone.

@@ -23,6 +23,23 @@ _FACT_CHECK_DOMAINS = [
 ]
 
 
+# Posts on these sites mostly just repeat the rumour being checked, so a hit
+# there is an echo of the claim, not evidence about it. Excluded from the
+# general search; fact-checkers' own sites are searched separately below.
+_SOCIAL_ECHO_DOMAINS = [
+    "facebook.com",
+    "instagram.com",
+    "x.com",
+    "twitter.com",
+    "youtube.com",
+    "tiktok.com",
+    "linkedin.com",
+    "threads.net",
+    "t.me",
+    "pinterest.com",
+]
+
+
 async def search(query: str, max_results: int = 5, include_domains: list[str] | None = None) -> list[dict]:
     query = query.strip()
     if not query:
@@ -34,6 +51,8 @@ async def search(query: str, max_results: int = 5, include_domains: list[str] | 
     body = {"query": query, "search_depth": "basic", "max_results": max_results}
     if include_domains:
         body["include_domains"] = include_domains
+    else:
+        body["exclude_domains"] = _SOCIAL_ECHO_DOMAINS
 
     async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
         resp = await client.post(

@@ -73,7 +73,13 @@ async def run_text_pipeline(raw_text: str, frequently_forwarded: bool) -> Pipeli
             verify.sources,
         )
     elif tier == "t2":
-        verify = await verify_t2(classify.claim_english, classify.claim_original, classify.detected_language)
+        verify = await verify_t2(
+            classify.claim_english,
+            classify.claim_original,
+            classify.detected_language,
+            classify.search_query,
+            classify.search_query_original,
+        )
         reply = compose_t2_reply(classify, verify, frequently_forwarded)
         verdict, confidence, explanation_en, sources = (
             verify.verdict,

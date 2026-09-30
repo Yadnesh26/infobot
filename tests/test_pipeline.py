@@ -643,3 +643,64 @@ async def test_orchestrator_survives_embedding_failure(monkeypatch):
     result = await run_text_pipeline("x", frequently_forwarded=False)
     assert "Verdict: False" in result.reply_text
     assert result.pending_claim_write["embedding"] is None
+
+
+# --- no-sources honesty + short search queries ---
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("lang,expected_fragment", [("en", "couldn't find reliable sources"), ("hi", "भरोसेमंद स्रोत"), ("mr", "विश्वासार्ह स्रोत")])
+async def test_verify_t2_with_no_citations_replaces_model_text_with_fixed_message(monkeypatch, lang, expected_fragment):
+    """Regression from a real chain message: the model cited nothing yet wrote
+    'this is an old baseless rumour' under an 'Unverifiable' verdict. Uncited
+    explanations must never reach the user."""
+
+    async def fake_search_for_claim(a, b, c):
+        return [{"title": "x", "url": "https://example.com/x", "content": "..."}]
+
+    async def fake_generate_json(prompt, schema, thinking_level="low"):
+        return {
+            "verdict": "unverifiable",
+            "used_sources": [],
+            "explanation_english": "This is an old baseless rumour with no official basis.",
+            "explanation_original_language": "ही जुनी निराधार अफवा आहे.",
+        }
+
+    monkeypatch.setattr("app.pipeline.verify.search_for_claim", fake_search_for_claim)
+    monkeypatch.setattr("app.pipeline.verify.generate_json", fake_generate_json)
+
+    result = await verify.verify_t2("claim", "claim", lang)
+    assert result.verdict == "unverifiable"
+    assert expected_fragment in result.explanation_original_language
+    assert "baseless" not in result.explanation_english
+    assert "baseless" not in result.explanation_original_language
+
+
+@pytest.mark.anyio
+async def test_verify_t2_searches_with_the_short_queries_not_the_claim_text(monkeypatch):
+    seen = {}
+
+    async def fake_search_for_claim(query_en, query_orig, lang):
+        seen.update(en=query_en, orig=query_orig)
+        return []
+
+    monkeypatch.setattr("app.pipeline.verify.search_for_claim", fake_search_for_claim)
+
+    await verify.verify_t2(
+        "a very long claim text " * 20, "लांब दावा " * 20, "mr",
+        search_query="maharashtra cash alms ban", search_query_original="महाराष्ट्र भिक्षा बंदी",
+    )
+    assert seen == {"en": "maharashtra cash alms ban", "orig": "महाराष्ट्र भिक्षा बंदी"}
+
+
+@pytest.mark.anyio
+async def test_verify_t2_falls_back_to_claim_text_when_no_queries_given(monkeypatch):
+    seen = {}
+
+    async def fake_search_for_claim(query_en, query_orig, lang):
+        seen.update(en=query_en, orig=query_orig)
+        return []
+
+    monkeypatch.setattr("app.pipeline.verify.search_for_claim", fake_search_for_claim)
+    await verify.verify_t2("english claim", "original claim", "mr")
+    assert seen == {"en": "english claim", "orig": "original claim"}

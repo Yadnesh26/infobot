@@ -6,8 +6,10 @@ Return ONLY a JSON object, no markdown fences, no commentary:
 {
   "detected_language": "<bcp47 code of the dominant language>",
   "is_verifiable_claim": <true|false>,
-  "claim_original": "<the core factual claim, in the original language>",
-  "claim_english": "<the same claim translated to English>",
+  "claim_original": "<the core factual claim in ONE sentence (max 40 words), in the original language>",
+  "claim_english": "<the same claim in ONE sentence (max 40 words), translated into English -- never a copy of the original text>",
+  "search_query": "<under 12 words, in English: the claim's subject matter as a plain web-search query -- do not paste the message, and do NOT add words like fact check, viral, message, true or false>",
+  "search_query_original": "<the same short search query, in the message's original language, with the same restriction>",
   "tier": "<t1|t2|t3a|t3b>",
   "domain": "<health|science|news|finance|social|other>"
 }
@@ -20,6 +22,10 @@ Tier definitions:
 - t3b: specific and consequential medical content -- dosages, drug
   interactions, treatment choices for a named condition, or urgent symptoms.
   Anything where a correct answer depends on the individual person.
+
+Long chain messages repeat themselves and pile on calls to share. Extract only the
+single central factual claim; ignore the pleading, the emojis and the instructions
+to forward.
 
 If the message contains no verifiable factual claim (a greeting, a joke, a
 personal message), set is_verifiable_claim to false and leave claim fields empty.

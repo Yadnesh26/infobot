@@ -12,6 +12,8 @@ _SCHEMA = {
         "is_verifiable_claim": {"type": "boolean"},
         "claim_original": {"type": "string"},
         "claim_english": {"type": "string"},
+        "search_query": {"type": "string"},
+        "search_query_original": {"type": "string"},
         "tier": {"type": "string", "enum": ["t1", "t2", "t3a", "t3b"]},
         "domain": {
             "type": "string",
@@ -30,6 +32,8 @@ class ClassifyResult:
     claim_english: str
     tier: str
     domain: str
+    search_query: str = ""
+    search_query_original: str = ""
 
 
 async def extract_and_classify(raw_text: str, frequently_forwarded: bool) -> ClassifyResult:
@@ -58,4 +62,6 @@ async def extract_and_classify(raw_text: str, frequently_forwarded: bool) -> Cla
         claim_english=claim_english,
         tier=tier,
         domain=data.get("domain", "other"),
+        search_query=(data.get("search_query") or "").strip(),
+        search_query_original=(data.get("search_query_original") or "").strip(),
     )
