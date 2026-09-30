@@ -11,8 +11,24 @@ from app.db import feedback as db_feedback
 from app.db import rate_limit as db_rate_limit
 from app.db import submissions as db_submissions
 from app.db import trending as db_trending
-from app.pipeline.normalize import AudioTooLongError, extract_audio_track, normalize_audio, normalize_image
-from app.pipeline.orchestrator import run_text_pipeline
+from app.pipeline.compose import (
+    compose_busy,
+    compose_photo_only,
+    compose_too_long,
+    compose_unreadable_media,
+)
+from app.pipeline.guard import MAX_AV_BYTES, MAX_IMAGE_BYTES
+from app.pipeline.messages import CAPABILITY, NOT_A_CLAIM_FALLBACK, all_langs
+from app.pipeline.normalize import (
+    AudioTooLongError,
+    MediaUnreadableError,
+    extract_audio_track,
+    label_transcript,
+    normalize_audio,
+    normalize_image,
+)
+from app.pipeline.orchestrator import PipelineResult, run_text_pipeline
+from app.providers.fallback_llm import FallbackError
 from app.providers.gemini import GeminiError
 from app.util import hash_phone, ref
 from app.whatsapp.client import download_media, mark_read, send_text_reply
@@ -20,6 +36,9 @@ from app.whatsapp.parser import InboundMessage, extract_messages
 from app.whatsapp.verify import valid_signature
 
 logging.basicConfig(level=logging.INFO)
+# httpx logs every request URL at INFO. Keep it quiet: URLs can carry identifiers,
+# and a key in a query string would end up in the logs.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("infobot")
 
 @asynccontextmanager
@@ -115,12 +134,13 @@ async def handle_message(msg: InboundMessage) -> None:
         except Exception:
             logger.warning("mark_read failed for wamid=%s, continuing", ref(msg.wamid), exc_info=True)
 
-        reply_text, pending_write, cache_hit = await _compose_reply(msg)
-        send_result = await send_text_reply(to=msg.sender, body=reply_text, reply_to_wamid=msg.wamid)
+        result = await _compose_reply(msg)
+        logger.info("Pipeline meta for %s: %s", ref(msg.wamid), result.meta)
+        send_result = await send_text_reply(to=msg.sender, body=result.reply_text, reply_to_wamid=msg.wamid)
 
-        # Cache write happens only after a successful send, so a DB hiccup here
+        # Cache writes happen only after a successful send, so a DB hiccup here
         # never costs the user their answer.
-        if pending_write is not None:
+        for pending_write in result.pending_claim_writes:
             try:
                 await db_cache.insert_claim(pending_write)
             except Exception:
@@ -134,30 +154,41 @@ async def handle_message(msg: InboundMessage) -> None:
             logger.exception("Failed to store reply_wamid for wamid=%s", ref(msg.wamid))
 
         try:
-            await db_submissions.mark_submission(msg.wamid, "done", cache_hit=cache_hit)
+            await db_submissions.mark_submission(msg.wamid, "done", cache_hit=result.cache_hit)
         except Exception:
             logger.exception("Failed to mark submission done for wamid=%s", ref(msg.wamid))
 
     except Exception as exc:
         logger.exception("Pipeline failed for wamid=%s", ref(msg.wamid))
         try:
-            await db_submissions.mark_submission(msg.wamid, "error", error=str(exc))
+            await db_submissions.mark_submission(msg.wamid, "error", error=repr(exc)[:300])
         except Exception:
             logger.exception("Failed to mark submission error for wamid=%s", ref(msg.wamid))
         try:
             await send_text_reply(
                 to=msg.sender,
-                body="Sorry, something went wrong processing that message. Please try again.",
+                body=_failure_reply(exc, msg),
                 reply_to_wamid=msg.wamid,
             )
         except Exception:
             logger.exception("Failed to send apology reply for wamid=%s", ref(msg.wamid))
 
 
-async def _compose_reply(msg: InboundMessage) -> tuple[str, dict | None, str | None]:
+_GENERIC_FAILURE = "Sorry, something went wrong processing that message. Please try again."
+
+
+def _failure_reply(exc: Exception, msg: InboundMessage) -> str:
+    """If the AI providers are what failed (quota, outage), say so and promise
+    nothing is wrong with the message; a real bug keeps the generic apology. The
+    text follows the user's language when it can be guessed from a caption."""
+    if isinstance(exc, (GeminiError, FallbackError)):
+        return compose_busy((msg.text or msg.caption or "")[:300])
+    return _GENERIC_FAILURE
+
+
+async def _compose_reply(msg: InboundMessage) -> PipelineResult:
     if msg.type == "text" and msg.text:
-        result = await run_text_pipeline(msg.text, msg.frequently_forwarded)
-        return result.reply_text, result.pending_claim_write, result.cache_hit
+        return await run_text_pipeline(msg.text, msg.frequently_forwarded)
 
     if msg.type == "image":
         return await _compose_image_reply(msg)
@@ -165,94 +196,90 @@ async def _compose_reply(msg: InboundMessage) -> tuple[str, dict | None, str | N
     if msg.type in ("audio", "video"):
         return await _compose_audio_or_video_reply(msg)
 
-    return "Got your message, but I couldn't find any text to check.", None, None
+    # Stickers, locations, contacts, documents...
+    return PipelineResult(
+        f"{all_langs(NOT_A_CLAIM_FALLBACK)}\n\n{all_langs(CAPABILITY)}", meta={"input_kind": "unsupported_type"}
+    )
 
 
-async def _compose_image_reply(msg: InboundMessage) -> tuple[str, dict | None, str | None]:
+async def _compose_image_reply(msg: InboundMessage) -> PipelineResult:
+    caption = (msg.caption or "").strip()
     if not msg.media_id:
-        return "Got your image, but there was no attachment to download.", None, None
+        return PipelineResult(compose_unreadable_media("image", caption), meta={"input_kind": "unreadable"})
 
     try:
         image_bytes = await download_media(msg.media_id)
     except Exception:
         logger.exception("Failed to download image for wamid=%s", ref(msg.wamid))
-        return "I couldn't download that image -- could you try resending it?", None, None
+        return PipelineResult(compose_busy(caption), meta={"input_kind": "download_failed"})
+
+    if len(image_bytes) > MAX_IMAGE_BYTES:
+        logger.info("Rejecting oversized image (%d bytes) for wamid=%s", len(image_bytes), ref(msg.wamid))
+        return PipelineResult(compose_unreadable_media("image", caption), meta={"input_kind": "too_large"})
 
     mime_type = msg.media_mime_type or "image/jpeg"
     try:
-        extracted_text = await normalize_image(image_bytes, mime_type, msg.caption)
+        reading = await normalize_image(image_bytes, mime_type, msg.caption)
     except GeminiError:
-        # Vision has no fallback provider, so say so honestly and offer the
-        # one thing that does work right now.
+        # Vision has no fallback provider. A caption is still readable text, so
+        # check that rather than fail outright.
         logger.exception("Image reading failed for wamid=%s", ref(msg.wamid))
-        return (
-            "I can't read images right now. If you can type out or paste the text "
-            "from the image, I can check that instead.",
-            None,
-            None,
-        )
+        if caption:
+            return await run_text_pipeline(
+                f"[Caption sent with the image]\n{caption}", msg.frequently_forwarded
+            )
+        return PipelineResult(compose_busy(), meta={"input_kind": "vision_unavailable"})
 
-    if extracted_text is None:
-        return (
-            "I couldn't find any readable text in that image, and there's no "
-            "caption either -- nothing here for me to check.",
-            None,
-            None,
-        )
+    if reading.text is None:
+        # A photo with nothing written on it and no caption: say what we can
+        # see, and be honest that we can't judge a photo itself.
+        if reading.description:
+            return PipelineResult(compose_photo_only(reading.description), meta={"input_kind": "photo_only"})
+        return PipelineResult(compose_unreadable_media("image"), meta={"input_kind": "unreadable"})
 
-    result = await run_text_pipeline(extracted_text, msg.frequently_forwarded)
-    return result.reply_text, result.pending_claim_write, result.cache_hit
+    return await run_text_pipeline(reading.text, msg.frequently_forwarded)
 
 
-async def _compose_audio_or_video_reply(msg: InboundMessage) -> tuple[str, dict | None, str | None]:
+async def _compose_audio_or_video_reply(msg: InboundMessage) -> PipelineResult:
+    caption = (msg.caption or "").strip()
     if not msg.media_id:
-        return f"Got your {msg.type}, but there was no attachment to download.", None, None
+        return PipelineResult(compose_unreadable_media(msg.type, caption), meta={"input_kind": "unreadable"})
 
     try:
         media_bytes = await download_media(msg.media_id)
     except Exception:
         logger.exception("Failed to download %s for wamid=%s", msg.type, ref(msg.wamid))
-        return f"I couldn't download that {msg.type} -- could you try resending it?", None, None
+        return PipelineResult(compose_busy(caption), meta={"input_kind": "download_failed"})
 
-    if msg.type == "video":
-        try:
-            audio_bytes = await extract_audio_track(media_bytes, msg.media_mime_type)
-        except Exception:
-            logger.exception("Failed to extract audio from video for wamid=%s", ref(msg.wamid))
-            return "I couldn't process the audio in that video -- could you try resending it?", None, None
-        audio_mime_type = "audio/wav"
-    else:
-        audio_bytes = media_bytes
-        audio_mime_type = msg.media_mime_type
+    if len(media_bytes) > MAX_AV_BYTES:
+        logger.info("Rejecting oversized %s (%d bytes) for wamid=%s", msg.type, len(media_bytes), ref(msg.wamid))
+        return PipelineResult(compose_too_long(msg.type, caption), meta={"input_kind": "too_large"})
 
     try:
+        if msg.type == "video":
+            audio_bytes = await extract_audio_track(media_bytes, msg.media_mime_type)
+            audio_mime_type = "audio/wav"
+        else:
+            audio_bytes = media_bytes
+            audio_mime_type = msg.media_mime_type
         transcript = await normalize_audio(audio_bytes, audio_mime_type)
     except AudioTooLongError as exc:
-        minutes = settings.MAX_AUDIO_SECONDS // 60
-        logger.info(
-            "Rejecting %s from wamid=%s: %.0fs exceeds cap", msg.type, ref(msg.wamid), exc.duration_seconds
-        )
-        return (
-            f"That {msg.type} is too long to check (over {minutes} minutes). "
-            "Please trim it or send a shorter clip.",
-            None,
-            None,
-        )
+        logger.info("Rejecting %s from wamid=%s: %.0fs exceeds cap", msg.type, ref(msg.wamid), exc.duration_seconds)
+        return PipelineResult(compose_too_long(msg.type, caption), meta={"input_kind": "too_long"})
+    except MediaUnreadableError:
+        logger.warning("Could not decode %s for wamid=%s", msg.type, ref(msg.wamid), exc_info=True)
+        return PipelineResult(compose_unreadable_media(msg.type, caption), meta={"input_kind": "unreadable"})
 
     if transcript is None:
-        return (
-            f"I couldn't transcribe that {msg.type} -- could you try resending it, "
-            "or send the text of the claim instead?",
-            None,
-            None,
-        )
+        return PipelineResult(compose_busy(caption), meta={"input_kind": "transcription_failed"})
 
-    combined = transcript
-    if msg.caption and msg.caption.strip():
-        combined = f"{transcript}\n{msg.caption.strip()}"
+    if not transcript:
+        # No speech. A caption may still carry the claim.
+        if caption:
+            return await run_text_pipeline(f"[Caption sent with the {msg.type}]\n{caption}", msg.frequently_forwarded)
+        return PipelineResult(compose_unreadable_media(msg.type), meta={"input_kind": "no_speech"})
 
-    result = await run_text_pipeline(combined, msg.frequently_forwarded)
-    return result.reply_text, result.pending_claim_write, result.cache_hit
+    return await run_text_pipeline(label_transcript(transcript, msg.type, msg.caption), msg.frequently_forwarded)
 
 
 async def _handle_reaction(msg: InboundMessage) -> None:

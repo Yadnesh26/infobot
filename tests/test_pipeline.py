@@ -6,6 +6,22 @@ from app.pipeline.confidence import confidence_label
 from app.pipeline.orchestrator import run_text_pipeline
 
 
+def _cls(lang, is_claim, original, english, tier, domain):
+    """A classifier JSON payload in the current multi-claim shape."""
+    if not is_claim:
+        return {
+            "detected_language": lang, "input_kind": "greeting", "claims": [],
+            "friendly_reply": "Good morning to you too!",
+        }
+    return {
+        "detected_language": lang, "input_kind": "claims",
+        "claims": [{
+            "claim_original": original, "claim_english": english, "language": lang,
+            "tier": tier, "domain": domain,
+        }],
+    }
+
+
 def _stub_cache_miss(monkeypatch):
     """Stub the cache/embedding calls in the orchestrator to simulate a full miss,
     so tests that only care about classify/verify routing don't need a real DB
@@ -29,14 +45,7 @@ def _stub_cache_miss(monkeypatch):
 @pytest.mark.anyio
 async def test_extract_and_classify_bumps_t1_to_t2_when_frequently_forwarded(monkeypatch):
     async def fake_generate_json(prompt, schema, thinking_level="low"):
-        return {
-            "detected_language": "en",
-            "is_verifiable_claim": True,
-            "claim_original": "hot water cures covid",
-            "claim_english": "hot water cures covid",
-            "tier": "t1",
-            "domain": "health",
-        }
+        return _cls("en", True, "hot water cures covid", "hot water cures covid", "t1", "health")
 
     monkeypatch.setattr("app.pipeline.classify.generate_json", fake_generate_json)
 
@@ -47,14 +56,7 @@ async def test_extract_and_classify_bumps_t1_to_t2_when_frequently_forwarded(mon
 @pytest.mark.anyio
 async def test_extract_and_classify_leaves_t1_alone_when_not_forwarded(monkeypatch):
     async def fake_generate_json(prompt, schema, thinking_level="low"):
-        return {
-            "detected_language": "en",
-            "is_verifiable_claim": True,
-            "claim_original": "x",
-            "claim_english": "x",
-            "tier": "t1",
-            "domain": "other",
-        }
+        return _cls("en", True, "x", "x", "t1", "other")
 
     monkeypatch.setattr("app.pipeline.classify.generate_json", fake_generate_json)
 
@@ -70,14 +72,7 @@ async def test_extract_and_classify_falls_back_when_claim_english_is_empty(monke
     """
 
     async def fake_generate_json(prompt, schema, thinking_level="low"):
-        return {
-            "detected_language": "hi",
-            "is_verifiable_claim": True,
-            "claim_original": "चंद्रयान-3 ने पानी खोजा",
-            "claim_english": "",
-            "tier": "t2",
-            "domain": "science",
-        }
+        return _cls("hi", True, "चंद्रयान-3 ने पानी खोजा", "", "t2", "science")
 
     monkeypatch.setattr("app.pipeline.classify.generate_json", fake_generate_json)
 
@@ -147,7 +142,7 @@ def test_confidence_label_buckets():
 
 
 def test_compose_t1_reply_omits_confidence_line_when_unverifiable():
-    c = classify.ClassifyResult("en", True, "x", "x", "t1", "other")
+    c = classify.ClassifyResult("en", "claims")
     v = verify.VerifyResult("unverifiable", None, "no idea", "no idea")
     reply = compose_t1_reply(c, v, frequently_forwarded=False)
     assert "Confidence:" not in reply
@@ -155,7 +150,7 @@ def test_compose_t1_reply_omits_confidence_line_when_unverifiable():
 
 
 def test_compose_t1_reply_adds_forwarded_notice():
-    c = classify.ClassifyResult("en", True, "x", "x", "t1", "other")
+    c = classify.ClassifyResult("en", "claims")
     v = verify.VerifyResult("false", 60, "nope", "nope")
     reply = compose_t1_reply(c, v, frequently_forwarded=True)
     assert "forwarded many times" in reply
@@ -167,46 +162,28 @@ async def test_orchestrator_short_circuits_non_claims(monkeypatch):
     _stub_cache_miss(monkeypatch)
 
     async def fake_generate_json(prompt, schema, thinking_level="low"):
-        return {
-            "detected_language": "en",
-            "is_verifiable_claim": False,
-            "claim_original": "",
-            "claim_english": "",
-            "tier": "t1",
-            "domain": "other",
-        }
+        return _cls("en", False, "", "", "t1", "other")
 
     monkeypatch.setattr("app.pipeline.classify.generate_json", fake_generate_json)
 
     result = await run_text_pipeline("good morning", frequently_forwarded=False)
-    assert "nothing to verify" in result.reply_text
+    assert "Good morning to you too!" in result.reply_text
+    assert "fact-check it" in result.reply_text  # the fixed capability line follows the model's reply
     assert result.pending_claim_write is None
 
 
 @pytest.mark.anyio
-async def test_orchestrator_returns_stub_for_out_of_schema_tier(monkeypatch):
-    """All four real tiers (t1/t2/t3a/t3b) are handled -- this only covers the
-    defensive fallback if the model ever returns something outside its own
-    JSON schema enum, which structured output should prevent but isn't
-    provably impossible."""
-    _stub_cache_miss(monkeypatch)
+async def test_extract_and_classify_treats_out_of_schema_tier_as_t2(monkeypatch):
+    """Structured output should prevent a tier outside the enum, but if one ever
+    slips through, searching is the safe default -- never a guess from memory."""
 
     async def fake_generate_json(prompt, schema, thinking_level="low"):
-        return {
-            "detected_language": "hi",
-            "is_verifiable_claim": True,
-            "claim_original": "x",
-            "claim_english": "x",
-            "tier": "bogus",
-            "domain": "health",
-        }
+        return _cls("hi", True, "x", "x", "bogus", "health")
 
     monkeypatch.setattr("app.pipeline.classify.generate_json", fake_generate_json)
 
-    result = await run_text_pipeline("some claim", frequently_forwarded=False)
-    assert "bogus" in result.reply_text
-    assert "doesn't support yet" in result.reply_text
-    assert result.pending_claim_write is None
+    result = await classify.extract_and_classify("some claim", frequently_forwarded=False)
+    assert result.tier == "t2"
 
 
 @pytest.mark.anyio
@@ -245,14 +222,7 @@ async def test_orchestrator_writes_pending_claim_only_on_fresh_t1_verdict(monkey
     _stub_cache_miss(monkeypatch)
 
     async def fake_classify_json(prompt, schema, thinking_level="low"):
-        return {
-            "detected_language": "en",
-            "is_verifiable_claim": True,
-            "claim_original": "x",
-            "claim_english": "x english",
-            "tier": "t1",
-            "domain": "other",
-        }
+        return _cls("en", True, "x", "x english", "t1", "other")
 
     async def fake_verify_json(prompt, schema, thinking_level="low"):
         return {
@@ -389,7 +359,7 @@ async def test_verify_t2_forces_unverifiable_when_model_cites_nothing(monkeypatc
 
 
 def test_compose_t2_reply_includes_sources_block():
-    c = classify.ClassifyResult("en", True, "x", "x", "t2", "health")
+    c = classify.ClassifyResult("en", "claims")
     v = verify.VerifyResult(
         "false", 85, "debunked", "debunked", sources=[{"title": "BOOM", "url": "https://boomlive.in/a"}]
     )
@@ -405,14 +375,7 @@ async def test_orchestrator_routes_t2_through_search_and_writes_cache(monkeypatc
     _stub_cache_miss(monkeypatch)
 
     async def fake_classify_json(prompt, schema, thinking_level="low"):
-        return {
-            "detected_language": "hi",
-            "is_verifiable_claim": True,
-            "claim_original": "x",
-            "claim_english": "x english",
-            "tier": "t2",
-            "domain": "news",
-        }
+        return _cls("hi", True, "x", "x english", "t2", "news")
 
     async def fake_search_for_claim(claim_english, claim_original, detected_language):
         return [{"title": "Newschecker", "url": "https://newschecker.in/y", "content": "..."}]
@@ -441,14 +404,7 @@ async def test_orchestrator_does_not_cache_unverifiable_t2_result(monkeypatch):
     _stub_cache_miss(monkeypatch)
 
     async def fake_classify_json(prompt, schema, thinking_level="low"):
-        return {
-            "detected_language": "en",
-            "is_verifiable_claim": True,
-            "claim_original": "x",
-            "claim_english": "x",
-            "tier": "t2",
-            "domain": "news",
-        }
+        return _cls("en", True, "x", "x", "t2", "news")
 
     async def fake_search_for_claim(claim_english, claim_original, detected_language):
         return []
@@ -512,14 +468,7 @@ async def test_orchestrator_t3a_caches_as_guidance_verdict(monkeypatch):
     _stub_cache_miss(monkeypatch)
 
     async def fake_classify_json(prompt, schema, thinking_level="low"):
-        return {
-            "detected_language": "en",
-            "is_verifiable_claim": True,
-            "claim_original": "x",
-            "claim_english": "x",
-            "tier": "t3a",
-            "domain": "health",
-        }
+        return _cls("en", True, "x", "x", "t3a", "health")
 
     async def fake_verify_json(prompt, schema, thinking_level="low"):
         return {
@@ -547,14 +496,7 @@ async def test_orchestrator_t3a_escalates_to_t3b_hard_stop(monkeypatch):
     _stub_cache_miss(monkeypatch)
 
     async def fake_classify_json(prompt, schema, thinking_level="low"):
-        return {
-            "detected_language": "en",
-            "is_verifiable_claim": True,
-            "claim_original": "x",
-            "claim_english": "x",
-            "tier": "t3a",
-            "domain": "health",
-        }
+        return _cls("en", True, "x", "x", "t3a", "health")
 
     async def fake_verify_json(prompt, schema, thinking_level="low"):
         return {"needs_escalation": True, "guidance_english": "", "guidance_original_language": ""}
@@ -575,14 +517,7 @@ async def test_orchestrator_t3b_never_calls_any_verify_llm(monkeypatch):
     _stub_cache_miss(monkeypatch)
 
     async def fake_classify_json(prompt, schema, thinking_level="low"):
-        return {
-            "detected_language": "en",
-            "is_verifiable_claim": True,
-            "claim_original": "x",
-            "claim_english": "x",
-            "tier": "t3b",
-            "domain": "health",
-        }
+        return _cls("en", True, "x", "x", "t3b", "health")
 
     def fail_if_called(*args, **kwargs):
         raise AssertionError("no verify-stage LLM call should happen for a direct t3b classification")
@@ -623,10 +558,7 @@ async def test_orchestrator_survives_embedding_failure(monkeypatch):
         raise AssertionError("semantic lookup must be skipped without an embedding")
 
     async def fake_classify_json(prompt, schema, thinking_level="low"):
-        return {
-            "detected_language": "en", "is_verifiable_claim": True,
-            "claim_original": "x", "claim_english": "x english", "tier": "t1", "domain": "other",
-        }
+        return _cls("en", True, "x", "x english", "t1", "other")
 
     async def fake_verify_json(prompt, schema, thinking_level="low"):
         return {

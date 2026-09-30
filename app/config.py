@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     WA_API_VERSION: str = "v21.0"
 
     GEMINI_API_KEY: str = ""
+    GEMINI_API_KEY_FALLBACK: str = ""  # a key from a separate Google account/project: its own quota
     GEMINI_MODEL: str = ""
     GEMINI_EMBED_MODEL: str = ""
 
@@ -28,6 +29,11 @@ class Settings(BaseSettings):
     SUPABASE_SERVICE_KEY: str = ""
 
     PHONE_HASH_SALT: str = ""
+    PROMPT_GUARD_MODEL: str = "meta-llama/llama-prompt-guard-2-86m"
+    PROMPT_GUARD_BLOCK_THRESHOLD: float = 0.5
+    PROMPT_GUARD_FLAG_THRESHOLD: float = 0.05
+    MAX_CLAIMS_PER_MESSAGE: int = 3
+
     SEMANTIC_MATCH_THRESHOLD: float = 0.90
     MAX_AUDIO_SECONDS: int = 180
     RATE_LIMIT_PER_HOUR: int = 20

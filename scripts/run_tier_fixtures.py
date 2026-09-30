@@ -36,6 +36,15 @@ FIXTURE_PATH = Path(__file__).parent.parent / "tests" / "fixtures" / "tier_fixtu
 DELAY_BETWEEN_CALLS = 1.5  # stay well clear of per-minute rate limits
 
 
+def effective(result) -> str:
+    """What the pipeline will do with this classification. A personal medical
+    request (input_kind health_advice_request) and a t3b claim both end at the
+    same static hard stop, so they count as the same outcome."""
+    if result.input_kind == "health_advice_request":
+        return "t3b"
+    return result.tier if result.is_verifiable_claim else "not-a-claim"
+
+
 async def main() -> int:
     fixtures = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
     results = []
@@ -55,9 +64,8 @@ async def main() -> int:
         if result is None:
             passed = False
         else:
-            ok_claim = result.is_verifiable_claim == expected_is_claim
-            ok_tier = (result.tier == case["expected_tier"]) if expected_is_claim else True
-            passed = ok_claim and ok_tier
+            expected = case.get("expected_tier") if expected_is_claim else "not-a-claim"
+            passed = effective(result) == expected
         results.append((case, result, passed))
         await asyncio.sleep(DELAY_BETWEEN_CALLS)
 
@@ -67,8 +75,10 @@ async def main() -> int:
     for case, result, passed in results:
         status = "PASS" if passed else "FAIL"
         expected = case.get("expected_tier") or "not-a-claim"
-        got = "ERROR" if result is None else (result.tier if result.is_verifiable_claim else "not-a-claim")
-        print(f"[{status}] expected={expected:<12} got={got:<12} :: {case['text'][:65]}  ({case['note']})")
+        got = "ERROR" if result is None else effective(result)
+        if result is not None and got != result.tier:
+            got = f"{got} ({result.input_kind})"
+        print(f"[{status}] expected={expected:<12} got={got:<30} :: {case['text'][:65]}  ({case['note']})")
 
     dosage_failures = [c for c, _ in failures if c.get("expected_tier") == "t3b"]
     if dosage_failures:

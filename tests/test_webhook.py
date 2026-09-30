@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 
 from app.config import settings
 from app.main import _compose_audio_or_video_reply, _compose_image_reply, app
-from app.pipeline.normalize import AudioTooLongError
+from app.pipeline.normalize import AudioTooLongError, ImageReading
 from app.whatsapp.parser import InboundMessage, extract_messages
 
 settings.WA_APP_SECRET = "test-secret"
@@ -193,53 +193,81 @@ def test_post_webhook_drops_duplicate_delivery(monkeypatch):
     assert "send_calls" not in sent  # claim_submission said "not new" -> no reply sent
 
 
-@pytest.mark.anyio
-async def test_compose_image_reply_runs_ocr_text_through_text_pipeline(monkeypatch):
+def _img_msg(wamid="wamid.IMG", caption=None):
+    return InboundMessage(
+        wamid=wamid, sender="919876543210", type="image",
+        media_id="media123", media_mime_type="image/jpeg", caption=caption,
+    )
+
+
+def _av_msg(kind, wamid="wamid.AV", caption=None):
+    return InboundMessage(
+        wamid=wamid, sender="919876543210", type=kind,
+        media_id="media456", media_mime_type="audio/ogg" if kind == "audio" else "video/mp4", caption=caption,
+    )
+
+
+def _patch_download(monkeypatch, payload=b"fake-bytes"):
+    async def fake_download_media(media_id):
+        return payload
+
+    monkeypatch.setattr("app.main.download_media", fake_download_media)
+
+
+def _patch_pipeline(monkeypatch, seen):
     from app.pipeline.orchestrator import PipelineResult
 
-    async def fake_download_media(media_id):
-        assert media_id == "media123"
-        return b"fake-image-bytes"
-
-    async def fake_normalize_image(image_bytes, mime_type, caption):
-        assert image_bytes == b"fake-image-bytes"
-        assert mime_type == "image/jpeg"
-        return "hot water cures covid"
-
     async def fake_run_text_pipeline(raw_text, frequently_forwarded):
-        assert raw_text == "hot water cures covid"
-        return PipelineResult("IMAGE VERDICT REPLY")
+        seen["text"] = raw_text
+        return PipelineResult("PIPELINE REPLY")
 
-    monkeypatch.setattr("app.main.download_media", fake_download_media)
-    monkeypatch.setattr("app.main.normalize_image", fake_normalize_image)
     monkeypatch.setattr("app.main.run_text_pipeline", fake_run_text_pipeline)
-
-    msg = InboundMessage(
-        wamid="wamid.IMG1", sender="919876543210", type="image",
-        media_id="media123", media_mime_type="image/jpeg", caption=None,
-    )
-    reply_text, pending_write, cache_hit = await _compose_image_reply(msg)
-    assert reply_text == "IMAGE VERDICT REPLY"
 
 
 @pytest.mark.anyio
-async def test_compose_image_reply_graceful_when_no_text_found(monkeypatch):
-    async def fake_download_media(media_id):
-        return b"fake-image-bytes"
+async def test_compose_image_reply_runs_labelled_text_through_text_pipeline(monkeypatch):
+    seen = {}
+    _patch_download(monkeypatch, b"fake-image-bytes")
+    _patch_pipeline(monkeypatch, seen)
 
     async def fake_normalize_image(image_bytes, mime_type, caption):
-        return None
+        assert image_bytes == b"fake-image-bytes" and mime_type == "image/jpeg"
+        return ImageReading(text="[Text inside the image]\nhot water cures covid", has_image_text=True)
 
-    monkeypatch.setattr("app.main.download_media", fake_download_media)
     monkeypatch.setattr("app.main.normalize_image", fake_normalize_image)
 
-    msg = InboundMessage(
-        wamid="wamid.IMG2", sender="919876543210", type="image",
-        media_id="media123", media_mime_type="image/jpeg", caption=None,
-    )
-    reply_text, pending_write, cache_hit = await _compose_image_reply(msg)
-    assert "couldn't find any readable text" in reply_text
-    assert pending_write is None
+    result = await _compose_image_reply(_img_msg())
+    assert result.reply_text == "PIPELINE REPLY"
+    assert seen["text"] == "[Text inside the image]\nhot water cures covid"
+
+
+@pytest.mark.anyio
+async def test_compose_image_reply_photo_only_describes_and_explains_limits(monkeypatch):
+    _patch_download(monkeypatch)
+
+    async def fake_normalize_image(image_bytes, mime_type, caption):
+        return ImageReading(text=None, description="A flooded street")
+
+    monkeypatch.setattr("app.main.normalize_image", fake_normalize_image)
+
+    result = await _compose_image_reply(_img_msg())
+    assert "A flooded street" in result.reply_text
+    assert "Google Lens" in result.reply_text
+    assert result.pending_claim_writes == []
+
+
+@pytest.mark.anyio
+async def test_compose_image_reply_with_nothing_at_all_says_so_in_all_languages(monkeypatch):
+    _patch_download(monkeypatch)
+
+    async def fake_normalize_image(image_bytes, mime_type, caption):
+        return ImageReading(text=None)
+
+    monkeypatch.setattr("app.main.normalize_image", fake_normalize_image)
+
+    result = await _compose_image_reply(_img_msg())
+    assert "couldn't read any text" in result.reply_text
+    assert "पढ़ने लायक" in result.reply_text  # Hindi follows
 
 
 @pytest.mark.anyio
@@ -249,51 +277,82 @@ async def test_compose_image_reply_handles_download_failure(monkeypatch):
 
     monkeypatch.setattr("app.main.download_media", fake_download_media)
 
-    msg = InboundMessage(
-        wamid="wamid.IMG3", sender="919876543210", type="image",
-        media_id="media123", media_mime_type="image/jpeg", caption=None,
-    )
-    reply_text, pending_write, cache_hit = await _compose_image_reply(msg)
-    assert "couldn't download" in reply_text
-    assert pending_write is None
+    result = await _compose_image_reply(_img_msg())
+    assert "try again" in result.reply_text
+    assert result.pending_claim_writes == []
 
 
 @pytest.mark.anyio
-async def test_compose_audio_reply_runs_transcript_through_text_pipeline(monkeypatch):
-    from app.pipeline.orchestrator import PipelineResult
+async def test_compose_image_reply_rejects_oversized_image_before_any_model_call(monkeypatch):
+    from app.pipeline.guard import MAX_IMAGE_BYTES
 
-    async def fake_download_media(media_id):
-        return b"fake-audio-bytes"
+    _patch_download(monkeypatch, b"x" * (MAX_IMAGE_BYTES + 1))
+
+    async def must_not_run(*a, **k):
+        raise AssertionError("an oversized image must not reach the vision model")
+
+    monkeypatch.setattr("app.main.normalize_image", must_not_run)
+    result = await _compose_image_reply(_img_msg())
+    assert result.meta["input_kind"] == "too_large"
+
+
+@pytest.mark.anyio
+async def test_compose_image_reply_falls_back_to_caption_when_vision_is_down(monkeypatch):
+    from app.providers.gemini import GeminiError
+
+    seen = {}
+    _patch_download(monkeypatch)
+    _patch_pipeline(monkeypatch, seen)
+
+    async def vision_down(image_bytes, mime_type, caption):
+        raise GeminiError("gemini down, and images have no fallback")
+
+    monkeypatch.setattr("app.main.normalize_image", vision_down)
+
+    result = await _compose_image_reply(_img_msg(caption="hot water cures covid"))
+    assert result.reply_text == "PIPELINE REPLY"
+    assert seen["text"] == "[Caption sent with the image]\nhot water cures covid"
+
+
+@pytest.mark.anyio
+async def test_compose_image_reply_says_busy_when_vision_is_down_and_no_caption(monkeypatch):
+    from app.providers.gemini import GeminiError
+
+    _patch_download(monkeypatch)
+
+    async def vision_down(image_bytes, mime_type, caption):
+        raise GeminiError("gemini down, and images have no fallback")
+
+    monkeypatch.setattr("app.main.normalize_image", vision_down)
+
+    result = await _compose_image_reply(_img_msg())
+    assert "overloaded" in result.reply_text
+
+
+@pytest.mark.anyio
+async def test_compose_audio_reply_labels_transcript_and_caption(monkeypatch):
+    seen = {}
+    _patch_download(monkeypatch, b"fake-audio-bytes")
+    _patch_pipeline(monkeypatch, seen)
 
     async def fake_normalize_audio(audio_bytes, mime_type):
-        assert audio_bytes == b"fake-audio-bytes"
-        assert mime_type == "audio/ogg"
+        assert audio_bytes == b"fake-audio-bytes" and mime_type == "audio/ogg"
         return "hot water cures covid"
 
-    async def fake_run_text_pipeline(raw_text, frequently_forwarded):
-        assert raw_text == "hot water cures covid"
-        return PipelineResult("AUDIO VERDICT REPLY")
-
-    monkeypatch.setattr("app.main.download_media", fake_download_media)
     monkeypatch.setattr("app.main.normalize_audio", fake_normalize_audio)
-    monkeypatch.setattr("app.main.run_text_pipeline", fake_run_text_pipeline)
 
-    msg = InboundMessage(
-        wamid="wamid.AUD1", sender="919876543210", type="audio",
-        media_id="media456", media_mime_type="audio/ogg", caption=None,
+    result = await _compose_audio_or_video_reply(_av_msg("audio", caption="is this true?"))
+    assert result.reply_text == "PIPELINE REPLY"
+    assert seen["text"] == (
+        "[Voice note transcript]\nhot water cures covid\n\n[Caption sent with the audio]\nis this true?"
     )
-    reply_text, pending_write, cache_hit = await _compose_audio_or_video_reply(msg)
-    assert reply_text == "AUDIO VERDICT REPLY"
 
 
 @pytest.mark.anyio
 async def test_compose_video_reply_extracts_audio_track_first(monkeypatch):
-    from app.pipeline.orchestrator import PipelineResult
-
-    calls = {}
-
-    async def fake_download_media(media_id):
-        return b"fake-video-bytes"
+    seen, calls = {}, {}
+    _patch_download(monkeypatch, b"fake-video-bytes")
+    _patch_pipeline(monkeypatch, seen)
 
     async def fake_extract_audio_track(video_bytes, mime_type):
         calls["extracted"] = True
@@ -301,64 +360,113 @@ async def test_compose_video_reply_extracts_audio_track_first(monkeypatch):
         return b"fake-extracted-audio"
 
     async def fake_normalize_audio(audio_bytes, mime_type):
-        assert audio_bytes == b"fake-extracted-audio"
-        assert mime_type == "audio/wav"
+        assert audio_bytes == b"fake-extracted-audio" and mime_type == "audio/wav"
         return "some transcribed claim"
 
-    async def fake_run_text_pipeline(raw_text, frequently_forwarded):
-        return PipelineResult("VIDEO VERDICT REPLY")
-
-    monkeypatch.setattr("app.main.download_media", fake_download_media)
     monkeypatch.setattr("app.main.extract_audio_track", fake_extract_audio_track)
     monkeypatch.setattr("app.main.normalize_audio", fake_normalize_audio)
-    monkeypatch.setattr("app.main.run_text_pipeline", fake_run_text_pipeline)
 
-    msg = InboundMessage(
-        wamid="wamid.VID1", sender="919876543210", type="video",
-        media_id="media789", media_mime_type="video/mp4", caption=None,
-    )
-    reply_text, pending_write, cache_hit = await _compose_audio_or_video_reply(msg)
+    result = await _compose_audio_or_video_reply(_av_msg("video"))
     assert calls.get("extracted") is True
-    assert reply_text == "VIDEO VERDICT REPLY"
+    assert result.reply_text == "PIPELINE REPLY"
+    assert seen["text"].startswith("[Video transcript]")
 
 
 @pytest.mark.anyio
 async def test_compose_audio_reply_rejects_over_duration_cap(monkeypatch):
-    async def fake_download_media(media_id):
-        return b"fake-audio-bytes"
+    _patch_download(monkeypatch)
 
     async def fake_normalize_audio(audio_bytes, mime_type):
         raise AudioTooLongError(999)
 
-    monkeypatch.setattr("app.main.download_media", fake_download_media)
     monkeypatch.setattr("app.main.normalize_audio", fake_normalize_audio)
 
-    msg = InboundMessage(
-        wamid="wamid.AUD2", sender="919876543210", type="audio",
-        media_id="media456", media_mime_type="audio/ogg", caption=None,
-    )
-    reply_text, pending_write, cache_hit = await _compose_audio_or_video_reply(msg)
-    assert "too long" in reply_text
-    assert pending_write is None
+    result = await _compose_audio_or_video_reply(_av_msg("audio"))
+    assert "too long" in result.reply_text
+    assert result.pending_claim_writes == []
 
 
 @pytest.mark.anyio
 async def test_compose_audio_reply_graceful_when_transcription_fails(monkeypatch):
-    async def fake_download_media(media_id):
-        return b"fake-audio-bytes"
+    _patch_download(monkeypatch)
 
     async def fake_normalize_audio(audio_bytes, mime_type):
         return None
 
-    monkeypatch.setattr("app.main.download_media", fake_download_media)
     monkeypatch.setattr("app.main.normalize_audio", fake_normalize_audio)
 
-    msg = InboundMessage(
-        wamid="wamid.AUD3", sender="919876543210", type="audio",
-        media_id="media456", media_mime_type="audio/ogg", caption=None,
-    )
-    reply_text, pending_write, cache_hit = await _compose_audio_or_video_reply(msg)
-    assert "couldn't transcribe" in reply_text
+    result = await _compose_audio_or_video_reply(_av_msg("audio"))
+    assert "overloaded" in result.reply_text
+
+
+@pytest.mark.anyio
+async def test_compose_audio_reply_with_no_speech_says_so(monkeypatch):
+    _patch_download(monkeypatch)
+
+    async def fake_normalize_audio(audio_bytes, mime_type):
+        return ""
+
+    monkeypatch.setattr("app.main.normalize_audio", fake_normalize_audio)
+
+    result = await _compose_audio_or_video_reply(_av_msg("audio"))
+    assert "couldn't make out any speech" in result.reply_text
+    assert result.meta["input_kind"] == "no_speech"
+
+
+@pytest.mark.anyio
+async def test_compose_audio_reply_with_no_speech_still_checks_the_caption(monkeypatch):
+    seen = {}
+    _patch_download(monkeypatch)
+    _patch_pipeline(monkeypatch, seen)
+
+    async def fake_normalize_audio(audio_bytes, mime_type):
+        return ""
+
+    monkeypatch.setattr("app.main.normalize_audio", fake_normalize_audio)
+
+    result = await _compose_audio_or_video_reply(_av_msg("audio", caption="petrol is Rs 200 now"))
+    assert result.reply_text == "PIPELINE REPLY"
+    assert "petrol is Rs 200 now" in seen["text"]
+
+
+@pytest.mark.anyio
+async def test_compose_video_reply_with_undecodable_file_is_handled(monkeypatch):
+    from app.pipeline.normalize import MediaUnreadableError
+
+    _patch_download(monkeypatch)
+
+    async def broken_extract(video_bytes, mime_type):
+        raise MediaUnreadableError("ffmpeg failed")
+
+    monkeypatch.setattr("app.main.extract_audio_track", broken_extract)
+
+    result = await _compose_audio_or_video_reply(_av_msg("video"))
+    assert "couldn't make out any speech" in result.reply_text
+    assert result.meta["input_kind"] == "unreadable"
+
+
+@pytest.mark.anyio
+async def test_compose_audio_reply_rejects_oversized_file_before_any_processing(monkeypatch):
+    from app.pipeline.guard import MAX_AV_BYTES
+
+    _patch_download(monkeypatch, b"x" * (MAX_AV_BYTES + 1))
+
+    async def must_not_run(*a, **k):
+        raise AssertionError("an oversized file must not be processed")
+
+    monkeypatch.setattr("app.main.normalize_audio", must_not_run)
+    monkeypatch.setattr("app.main.extract_audio_track", must_not_run)
+    result = await _compose_audio_or_video_reply(_av_msg("video"))
+    assert result.meta["input_kind"] == "too_large"
+
+
+@pytest.mark.anyio
+async def test_compose_reply_for_unsupported_message_type_points_to_what_works():
+    from app.main import _compose_reply
+
+    msg = InboundMessage(wamid="wamid.STK", sender="919876543210", type="sticker")
+    result = await _compose_reply(msg)
+    assert "fact-check" in result.reply_text
 
 
 # --- M8: rate limiting, reactions/feedback, trending ---
@@ -446,25 +554,3 @@ def test_trending_endpoint_returns_data_from_db(monkeypatch):
     resp = client.get("/trending")
     assert resp.status_code == 200
     assert resp.json()[0]["claim_text_en"] == "x"
-
-
-@pytest.mark.anyio
-async def test_compose_image_reply_asks_for_text_when_vision_is_down(monkeypatch):
-    from app.providers.gemini import GeminiError
-
-    async def fake_download_media(media_id):
-        return b"fake-image-bytes"
-
-    async def vision_down(image_bytes, mime_type, caption):
-        raise GeminiError("gemini down, and images have no fallback")
-
-    monkeypatch.setattr("app.main.download_media", fake_download_media)
-    monkeypatch.setattr("app.main.normalize_image", vision_down)
-
-    msg = InboundMessage(
-        wamid="wamid.IMG9", sender="919876543210", type="image",
-        media_id="media123", media_mime_type="image/jpeg", caption=None,
-    )
-    reply_text, pending_write, cache_hit = await _compose_image_reply(msg)
-    assert "can't read images right now" in reply_text
-    assert pending_write is None
