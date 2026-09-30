@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Privacy policy — InfoBot</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+  <h1>Privacy policy</h1>
+  <p class="updated">Last updated: 30 September 2026</p>
+
+  <p>InfoBot is a WhatsApp service that fact-checks messages you forward to it. It is run by [YOUR NAME], based in India ("we", "us"). This page explains what happens to the things you send.</p>
+
+  <h2>What we receive</h2>
+  <p>When you message InfoBot on WhatsApp, WhatsApp passes us:</p>
+  <ul>
+    <li>the message you sent (text, an image, a voice note or a video) and any caption;</li>
+    <li>your phone number, which we need in order to reply to you;</li>
+    <li>whether the message was marked as forwarded, and any emoji reaction you put on our reply.</li>
+  </ul>
+
+  <h2>What we store</h2>
+  <ul>
+    <li><strong>Your phone number is never stored in readable form.</strong> We keep only a salted one-way hash of it, which lets us count repeat use and enforce a per-hour limit without keeping the number itself.</li>
+    <li><strong>A record of each request:</strong> the WhatsApp message ID, the hashed identifier, the type of message (text, image, audio, video), whether it was forwarded, whether the answer came from a previous check, a status, any technical error text, and timestamps.</li>
+    <li><strong>The claim we checked and our answer:</strong> a short English statement of the claim we extracted from your message, the verdict, our explanation and the source links. These are kept so that the same rumour can be answered instantly next time, and so we can show which rumours are spreading. They are not attached to you, but if a message contains personal details that end up in the extracted claim, they would be in this text, so please do not forward private information.</li>
+    <li><strong>Reactions:</strong> if you react to a reply with an emoji, we store the emoji against that request.</li>
+  </ul>
+  <p>We do <strong>not</strong> store the original text, images, audio or video you send. They are processed in memory or in a temporary file that is deleted straight away.</p>
+
+  <h2>Who else handles your message</h2>
+  <p>To do its job, InfoBot sends your message content to the following services. Each handles it under its own terms and privacy policy:</p>
+  <ul>
+    <li><strong>Meta (WhatsApp Business Platform)</strong> delivers messages between you and us.</li>
+    <li><strong>Google (Gemini API)</strong> reads text out of images, works out the claim and helps produce the verdict.</li>
+    <li><strong>Tavily</strong> receives the text of the claim to search the web for sources.</li>
+    <li><strong>ElevenLabs</strong> transcribes voice notes and the audio of videos. A second transcription service may be used if it is unavailable.</li>
+    <li><strong>Supabase</strong> hosts our database.</li>
+  </ul>
+  <p>We do not sell your data and do not use it for advertising.</p>
+
+  <h2>Health information</h2>
+  <p>InfoBot gives general information only and is not medical advice. If a message asks about doses, medicines, symptoms or a specific condition, InfoBot does not try to answer it and points you to a doctor or pharmacist.</p>
+
+  <h2>How long we keep things</h2>
+  <p>We currently keep request records and cached claims until you ask us to delete them or we remove them ourselves. We will update this section if we introduce automatic deletion.</p>
+
+  <h2>Your rights</h2>
+  <p>You can ask us to tell you what we hold about you, correct it, or delete it. See <a href="data-deletion.html">how to request deletion</a>. If you are in India, you may also complain to us about how we handle your data using the contact below, and we will respond.</p>
+
+  <h2>Children</h2>
+  <p>InfoBot is not meant for children under 18 and we do not knowingly collect their data.</p>
+
+  <h2>Changes</h2>
+  <p>If we change this policy we will update the date above. Material changes will also be announced on this site.</p>
+
+  <h2>Contact</h2>
+  <p>[YOUR NAME] — <a href="mailto:[CONTACT EMAIL]">[CONTACT EMAIL]</a></p>
+
+  <footer>
+    <a href="index.html">Home</a>
+    <a href="data-deletion.html">Delete my data</a>
+  </footer>
+</main>
+</body>
+</html>
