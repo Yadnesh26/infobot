@@ -26,6 +26,15 @@ def test_menu_commands(text):
 
 
 @pytest.mark.parametrize(
+    "text",
+    ["Langauge", "langage", "Languge!", "lnaguage", "languages", "change langauge", "chnage language", "Marathii ", "Inglish"],
+)
+def test_a_typo_in_a_language_command_opens_the_menu(text):
+    # Regression: "Langauge" was sent through the fact-checker, which replied "no claim found".
+    assert language.parse_command(text) == language.MENU
+
+
+@pytest.mark.parametrize(
     "text,code",
     [("English", "en"), ("hindi", "hi"), ("हिंदी", "hi"), ("हिन्दी", "hi"), ("Marathi.", "mr"), ("मराठी", "mr"), ("इंग्रजी", "en")],
 )
@@ -42,6 +51,10 @@ def test_choosing_a_language_by_typing_its_name(text, code):
         "The language of the forwarded message is English and it says petrol is Rs 200",
         "language " * 10,
         "hello",
+        "Hindu",  # one letter from "hindi", but short words never get typo tolerance
+        "Gujarati",
+        "landing page",
+        "Languages of India are 22",
     ],
 )
 def test_ordinary_messages_are_never_treated_as_language_commands(text):
