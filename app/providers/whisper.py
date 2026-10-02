@@ -1,5 +1,4 @@
-import httpx
-
+from app import http
 from app.config import settings
 
 _TIMEOUT = 60  # per the plan's resilience section
@@ -30,15 +29,16 @@ async def transcribe(audio_bytes: bytes, filename: str = "audio.wav", mime_type:
     """
     url, api_key, model = _endpoint()
 
-    async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-        resp = await client.post(
-            url,
-            headers={"Authorization": f"Bearer {api_key}"},
-            data={"model": model},
-            files={"file": (filename, audio_bytes, mime_type)},
-        )
-        resp.raise_for_status()
-        data = resp.json()
+    resp = await http.post(
+        "whisper",
+        url,
+        timeout=_TIMEOUT,
+        headers={"Authorization": f"Bearer {api_key}"},
+        data={"model": model},
+        files={"file": (filename, audio_bytes, mime_type)},
+    )
+    resp.raise_for_status()
+    data = resp.json()
 
     text = (data.get("text") or "").strip()
     if not text:

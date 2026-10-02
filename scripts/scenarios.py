@@ -30,6 +30,7 @@ class Scenario:
     video: str | None = None
     caption: str | None = None
     ff: bool = False  # frequently forwarded
+    reply_lang: str | None = None  # the user's chosen reply language
     kinds: set[str] | None = None  # acceptable meta["input_kind"]
     claims: tuple[int, int] | None = None  # acceptable claim count
     blocked: bool | None = None
@@ -124,8 +125,8 @@ add("E03-poster-3-mixed-language", "multi-claim-image", image="img_multi_mixed.p
 add("F01-greeting", "non-claim-text", text="Good morning! 🙏", kinds={"greeting"}, claims=(0, 0), contextual=True)
 add("F02-greeting-hi", "non-claim-text", text="नमस्ते, कैसे हो आप?", kinds={"greeting"}, claims=(0, 0), contextual=True, devanagari=True)
 add("F03-what-can-you-do", "non-claim-text", text="What can you do? How do you work?", kinds={"question_about_bot"}, claims=(0, 0), contextual=True)
-add("F04-opinion", "non-claim-text", text="Cricket is the best sport in the world and Sachin is a legend", kinds={"opinion_or_prediction"}, claims=(0, 0), contextual=True, must_not=[r"Verdict"])
-add("F05-prediction", "non-claim-text", text="India will win the next cricket world cup for sure", kinds={"opinion_or_prediction"}, claims=(0, 0), contextual=True, must_not=[r"Verdict"])
+add("F04-opinion", "non-claim-text", text="Cricket is the best sport in the world and Sachin is a legend", kinds={"opinion_or_prediction"}, claims=(0, 0), contextual=True, must_not=[r"[✅❌⚠❓] \*"])
+add("F05-prediction", "non-claim-text", text="India will win the next cricket world cup for sure", kinds={"opinion_or_prediction"}, claims=(0, 0), contextual=True, must_not=[r"[✅❌⚠❓] \*"])
 add("F06-private-event", "non-claim-text", text="My neighbour Ramesh lost his job yesterday and his wife is very upset", kinds={"personal_or_private", "opinion_or_prediction"}, claims=(0, 0), contextual=True)
 add("F07-write-code", "non-claim-text", text="Write me a python function to sort a list of numbers", kinds={"out_of_scope_request"}, claims=(0, 0), contextual=True, must_not=[r"def ", r"sorted\("])
 add("F08-translate", "non-claim-text", text="Translate 'good night' into Marathi", kinds={"out_of_scope_request"}, claims=(0, 0), contextual=True, must_not=[r"शुभ रात्री"])
@@ -134,7 +135,7 @@ add("F10-single-word", "non-claim-text", text="this", kinds={"unclear", "greetin
 add("F11-village-magic", "non-claim-text", text="My grandmother says the old well in our village has magical water that never dries",
     kinds=NONCLAIM_KINDS | {"claims"}, verdicts={"unverifiable", "false", "misleading", "guidance", "true"})
 add("F12-medical-advice", "non-claim-text", text="I have fever and body ache for 3 days, which medicine should I take and how much?", kinds={"health_advice_request", "claims"}, must=[T3B], no_write=False)
-add("F13-folk-belief", "non-claim-text", text="Is it true that eating curd at night gives you a cold?", kinds={"claims"}, claims=(1, 1), must_not=[r"Verdict: (True|False)"])
+add("F13-folk-belief", "non-claim-text", text="Is it true that eating curd at night gives you a cold?", kinds={"claims"}, claims=(1, 1), must_not=[r"[✅❌] \*"])
 add("F14-emoji-only", "non-claim-text", text="🙏🙏🙏🌹🌹", kinds=NONCLAIM_KINDS, claims=(0, 0))
 add("F15-marathi-recipe", "non-claim-text", text="आज जेवायला काय बनवू?", kinds={"out_of_scope_request", "personal_or_private", "unclear"}, claims=(0, 0), contextual=True, devanagari=True)
 add("F16-bare-link", "non-claim-text", text="https://example.com/abc123", kinds=NONCLAIM_KINDS | {"claims"}, must_not=[r"example\.com"])
@@ -187,7 +188,7 @@ add("I03-voice-mr", "audio", audio="aud_mr_single.ogg", kinds={"claims"}, claims
 add("I04-voice-multi", "audio", audio="aud_multi_en.ogg", kinds={"claims"}, claims=(3, 3))
 add("I05-voice-three-languages", "audio", audio="aud_mixed_langs.ogg", kinds={"claims"}, claims=(2, 3))
 add("I06-voice-chatter", "audio", audio="aud_chatter.ogg", kinds={"personal_or_private", "greeting", "out_of_scope_request", "unclear", "opinion_or_prediction"}, claims=(0, 0), contextual=True)
-add("I07-voice-opinion", "audio", audio="aud_opinion.ogg", kinds={"opinion_or_prediction"}, claims=(0, 0), contextual=True, must_not=[r"Verdict"])
+add("I07-voice-opinion", "audio", audio="aud_opinion.ogg", kinds={"opinion_or_prediction"}, claims=(0, 0), contextual=True, must_not=[r"[✅❌⚠❓] \*"])
 add("I08-voice-ask-bot", "audio", audio="aud_question_bot.ogg", kinds={"question_about_bot", "greeting"}, claims=(0, 0), contextual=True)
 add("I09-voice-medical", "audio", audio="aud_medical.ogg", kinds={"health_advice_request", "claims"}, must=[T3B])
 add("I10-voice-greeting", "audio", audio="aud_greeting.ogg", kinds={"greeting"}, claims=(0, 0), contextual=True)
@@ -195,3 +196,35 @@ add("I11-voice-with-caption", "audio", audio="aud_en_single.ogg", caption="pleas
 add("I12-video-claim-en", "video", video="vid_en_claim.mp4", kinds={"claims"}, claims=(1, 1))
 add("I13-video-claim-hi", "video", video="vid_hi_claim.mp4", kinds={"claims"}, claims=(1, 1), devanagari=True)
 add("I14-video-multi", "video", video="vid_multi.mp4", kinds={"claims"}, claims=(3, 3))
+
+
+# ---------------------------------------------------------------- J. mixed messages, formatting, chosen language
+# claims_test/claim6, verbatim: a greeting, a village story, a request and an opinion, no checkable claim.
+CLAIM6 = (
+    "Good morning everyone! 🙏\n"
+    "My grandmother says the old well in our village has magical water that never dries.\n"
+    "Can you also write me a short poem about the rain?\n"
+    "And I personally think cricket is the best sport in the world."
+)
+add("J01-claim6-verbatim", "mixed-message", text=CLAIM6, kinds={"personal_or_private", "opinion_or_prediction", "out_of_scope_request", "greeting"},
+    claims=(0, 0), contextual=True, must_any=[r"poem"], must_not=[r"[✅❌⚠❓] \*", r"don't forward"])
+add("J02-claim-plus-request", "mixed-message", text="Petrol will cost Rs 200 per litre from tomorrow, forward to everyone! Also can you write me a poem about rain?",
+    kinds={"claims"}, claims=(1, 1), must=[r"\*Why:\*", r"💬"], must_any=[r"poem"])
+add("J03-claim-plus-greeting-hindi", "mixed-message", text="नमस्ते! क्या यह सच है कि मनुष्य अपने दिमाग का सिर्फ 10 प्रतिशत इस्तेमाल करता है?",
+    kinds={"claims"}, claims=(1, 1), devanagari=True)
+add("J04-hearsay-about-a-public-scheme", "mixed-message", text="My cousin says the government will give Rs 5000 to every girl child from next month",
+    kinds={"claims"}, claims=(1, 1))
+add("L01-english-claim-hindi-reply", "reply-language", text="Humans use only 10 percent of their brain.", reply_lang="hi",
+    kinds={"claims"}, claims=(1, 1), devanagari=True, must=[r"\*गलत\*"])
+add("L02-hindi-claim-english-reply", "reply-language", text="क्या यह सच है कि मनुष्य अपने दिमाग का सिर्फ 10 प्रतिशत इस्तेमाल करता है?", reply_lang="en",
+    kinds={"claims"}, claims=(1, 1), must=[r"\*FALSE\*"])
+add("L03-greeting-marathi-reply", "reply-language", text="Good morning!", reply_lang="mr",
+    kinds={"greeting"}, claims=(0, 0), devanagari=True, contextual=True)
+add("L04-blurry-image-hindi-reply", "reply-language", image="img_blurry.jpg", reply_lang="hi",
+    kinds={"unreadable", "photo_only"}, devanagari=True, must_not=[r"Google Lens"])
+add("L05-silent-voice-note-marathi-reply", "reply-language", audio="aud_silence.ogg", reply_lang="mr",
+    kinds={"no_speech"}, devanagari=True)
+add("L06-three-claims-hindi-reply", "reply-language", text="1) Lightning never strikes the same place twice. 2) Mount Everest is the tallest mountain above sea level. 3) The Earth is flat.",
+    reply_lang="hi", kinds={"claims"}, claims=(3, 3), must=[r"\*3 दावे जाँचे गए\*", r"━━━━━━━━━━━━"])
+add("L07-medical-stays-the-fixed-text-in-any-language", "reply-language", text="I have had fever for 3 days, how much paracetamol should I take?", reply_lang="hi",
+    kinds={"health_advice_request", "claims"}, must=[T3B])

@@ -130,8 +130,66 @@ Impact: `providers/gemini.py`, `config.py`, `.env`.
 
 Date: 2026-10-01
 
-Decision: Verdict, confidence, sources and footer labels follow the claim's language (en/hi/mr). English claims always use the English explanation (the model was drifting into Hindi because of Hindi search results). Cache hits render in English because only `explanation_en` is stored.
+Decision: Verdict, confidence, sources and footer labels follow the claim's language (en/hi/mr). English claims always use the English explanation (the model was drifting into Hindi because of Hindi search results). Cache hits were rendered in English because only `explanation_en` is stored (superseded by DECISION-015: they are now translated).
 
 Reason: A Hindi reader should not get an English frame; storing per-language explanations needs a schema change.
 
 Impact: `compose.py`, `messages.py`, `verify._local_text`. See the TASKS item on localised cache hits.
+
+## DECISION-013: Reply language is the user's explicit choice, offered once by buttons
+
+Date: 2026-10-01
+
+Decision: After a new user's first answer, send one message with three reply buttons (English / हिन्दी / मराठी). A tap, or typing `language` / `भाषा` / `bhasha`, or typing a language name, sets the language; it is stored in `user_prefs` keyed by the hashed phone number and used for every later reply. The offer is made once (`prompted` flag) and never repeated. The menu is the one deliberately trilingual message. Until a user chooses, each answer follows the language of its own claim. If the language is unknown (media with no text), the reply is English only, never three languages stacked.
+
+Reason: Language guessing fails on Hinglish, images and voice notes, and stacking all three languages read as a mess. Buttons cost nothing (they fit WhatsApp's 3-button limit and are free inside the 24-hour window), need one small table, and do not block the first answer.
+
+Alternatives: Ask before answering (blocks the first message and needs pending-message state); silently remember the last detected language (no table needed, but wrong for mixed-language users and gives them no way to correct it); always reply in all languages.
+
+Impact: `app/db/prefs.py`, `app/pipeline/language.py`, `app/main.py`, `reply_lang` through the orchestrator, compose, classify and verify. Only exact whole-message matches count as commands, so a forwarded claim that mentions a language is still fact-checked.
+
+## DECISION-014: Replies use WhatsApp formatting, verdict first
+
+Date: 2026-10-01
+
+Decision: Only WhatsApp's own markup is used (`*bold*`, `_italic_`, emoji, a divider line); there are no headings or tables. A single claim is a card: verdict line with emoji, a confidence dot line, the quoted claim, `*Why:*`, `*Sources*`, footer. Several claims start with an at-a-glance summary (one line per claim), then one divider-separated block each. Source lists shrink (and titles shorten) before any claim is cut to fit 4096 characters. `*`, `_`, `~` and backticks are stripped from user-derived headlines and model text so they cannot break or hijack the layout. The medical hard stop text is unchanged.
+
+Reason: Users scan; the answer must be readable from the first line without scrolling, and several claims in one message need a visible separation.
+
+Alternatives: Plain text as before; one long block per claim without a summary.
+
+Impact: `compose.py`, `messages.py`; every test that asserted the old `Verdict:` layout.
+
+## DECISION-015: Cached answers are translated, not shown in English
+
+Date: 2026-10-01 (supersedes the cache-hit part of DECISION-012)
+
+Decision: The cache still stores English only. For a reader of another language, one small Gemini call (20 s cap) translates the explanation (and headline on the whole-message path). If it fails or times out, the English text is shown with English labels; a reply never mixes a translated frame with untranslated text.
+
+Reason: Popular rumours are exactly the cached ones, and a language preference would be meaningless for them otherwise.
+
+Alternatives: Store per-language explanations (schema change, more write cost); leave hits in English.
+
+Impact: `orchestrator._outcome_from_row`, the exact-hit path, `verify.translate_texts`, `ClaimOutcome.local_lang`.
+
+## DECISION-016: What counts as a claim
+
+Date: 2026-10-01
+
+Decision: Second-hand anecdotes and local lore ("my grandmother says our village well is magical") are `personal_or_private`; hearsay about a public matter (a scheme, price, law, disease) is a claim. A claim must come from the user's own words, never from an image description. A message with claims plus chit-chat or requests keeps its claims and gets a one-sentence side note about the rest; a message with no claim gets one bulleted line per part. Blurred or blank images (by the vision model's `content_kind`, or by words like "blurred"/"featureless" in its description) are "unreadable" and get a request for a clearer picture, not the can't-judge-authenticity text.
+
+Reason: The owner wants a very low rejection rate, answered in a way that shows the message was understood; a village story run through a web search ended in "couldn't find reliable sources, don't forward it".
+
+Impact: `extract_classify.txt`, `compose`, `normalize.normalize_image`. Changes to the classifier prompt must keep `run_tier_fixtures.py` at 15/15.
+
+## DECISION-017: Deploy as two containers on one EC2 instance, from GitHub Actions, without stored keys
+
+Date: 2026-10-01
+
+Decision: One EC2 instance (Amazon Linux 2023, x86_64, t3.small) runs `docker compose` with the bot and Caddy (automatic HTTPS). Images live in a private ECR registry. `deploy.yml` (push to `main`) runs the tests, builds and pushes the image, then uses AWS SSM Run Command to make the instance pull and restart it; `remote-deploy.sh` waits for the bot's health check and rolls back on failure. GitHub authenticates to AWS with OIDC for the `production` environment only, so no AWS keys are stored in GitHub. The instance has no SSH port; Session Manager is the way in. The bot's secrets are created once by hand in `/opt/infobot/app.env` and are never in GitHub, the image or CloudFormation. Dependencies are pinned in `requirements.lock`, generated inside a Linux container. Without a domain the host name is `<elastic-ip-dashed>.sslip.io`.
+
+Reason: Meta requires a public HTTPS webhook; the bot needs ffmpeg and an always-on process (replies are sent from background tasks, which serverless platforms starve). This gives reproducible builds, deploys with automatic rollback, and the smallest credential surface for a first production deployment.
+
+Alternatives: SSH deploy (needs port 22 open and a long-lived key in GitHub); GHCR instead of ECR (needs a pull token on the server); secrets in SSM Parameter Store (better auditing, more setup, listed as an upgrade); Render/Railway/Oracle free tiers (cheaper, but no AWS account integration and, for Render free, sleeping); ECS/Fargate or Lambda (more moving parts; Lambda suits neither ffmpeg nor post-response work); ARM (t4g) for lower cost (needs an arm64 image build).
+
+Impact: `Dockerfile`, `deploy/`, `.github/workflows/`, `requirements.lock` (regenerate it inside `python:3.12-slim` when dependencies change, not from the Windows venv). One instance means a brief gap during each deploy (Meta retries, message ids de-duplicate) and no automatic recovery if the instance itself fails.

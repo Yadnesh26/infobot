@@ -7,7 +7,7 @@ Return ONLY a JSON object, no markdown fences, no commentary:
   "verdict": "<true|false|misleading|unverifiable>",
   "model_is_confident": <true|false>,
   "explanation_english": "<2-3 plain-language sentences explaining the verdict>",
-  "explanation_original_language": "<the same explanation, written in the language named by language=... in the claim block (en means English), whatever language the search results are in>"
+  "explanation_original_language": "<the same explanation, written in the language named on the "Reply language" line of the claim block, whatever language the claim or the search results are in>"
 }
 
 Rules:

@@ -145,8 +145,8 @@ def test_compose_t1_reply_omits_confidence_line_when_unverifiable():
     c = classify.ClassifyResult("en", "claims")
     v = verify.VerifyResult("unverifiable", None, "no idea", "no idea")
     reply = compose_t1_reply(c, v, frequently_forwarded=False)
-    assert "Confidence:" not in reply
-    assert "Unverifiable" in reply
+    assert "confidence" not in reply
+    assert "❓ *UNVERIFIED*" in reply
 
 
 def test_compose_t1_reply_adds_forwarded_notice():
@@ -154,7 +154,7 @@ def test_compose_t1_reply_adds_forwarded_notice():
     v = verify.VerifyResult("false", 60, "nope", "nope")
     reply = compose_t1_reply(c, v, frequently_forwarded=True)
     assert "forwarded many times" in reply
-    assert "Confidence: Medium" in reply
+    assert "🟡 *Medium* confidence" in reply
 
 
 @pytest.mark.anyio
@@ -364,10 +364,9 @@ def test_compose_t2_reply_includes_sources_block():
         "false", 85, "debunked", "debunked", sources=[{"title": "BOOM", "url": "https://boomlive.in/a"}]
     )
     reply = compose_t2_reply(c, v, frequently_forwarded=False)
-    assert "Sources:" in reply
-    assert "BOOM" in reply
-    assert "https://boomlive.in/a" in reply
-    assert "no sources searched yet" not in reply
+    assert "*Sources*" in reply
+    assert "1. BOOM\nhttps://boomlive.in/a" in reply
+    assert "no sources searched" not in reply
 
 
 @pytest.mark.anyio
@@ -573,7 +572,7 @@ async def test_orchestrator_survives_embedding_failure(monkeypatch):
     monkeypatch.setattr("app.pipeline.verify.generate_json", fake_verify_json)
 
     result = await run_text_pipeline("x", frequently_forwarded=False)
-    assert "Verdict: False" in result.reply_text
+    assert "❌ *FALSE*" in result.reply_text
     assert result.pending_claim_write["embedding"] is None
 
 

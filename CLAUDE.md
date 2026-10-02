@@ -29,15 +29,19 @@ Python 3.10, FastAPI + uvicorn, httpx, pydantic-settings. Supabase Postgres with
 app/main.py            webhook, per-message handler, media handlers, failure replies
 app/config.py          all settings (env-driven); .env.example lists every variable
 app/pipeline/          guard.py (injection screen) -> classify.py -> verify.py -> compose.py;
-                       orchestrator.py ties them; normalize.py (media->text); messages.py (static en/hi/mr text)
+                       orchestrator.py ties them; normalize.py (media->text); messages.py (static en/hi/mr text);
+                       language.py (recognising a language request)
 app/prompts/           every LLM prompt and the static medical hard-stop text
 app/providers/         gemini.py (key rotation), fallback_llm.py (Groq), tavily.py, elevenlabs.py, whisper.py
-app/db/                claims cache, submissions, rate limit, feedback, trending
+app/db/                claims cache, submissions, rate limit, feedback, trending, prefs (reply language)
+db/migrations/         SQL for schema changes made after the first setup (apply via Supabase, then keep the file)
 app/whatsapp/          inbound parser, Graph API client, signature check
 scripts/               live runners: run_tier_fixtures.py, run_scenarios.py (+ scenarios.py), asset/claims generators
 tests/                 unit tests (no network), fixtures, scenarios/assets (git-ignored)
 claims_test/           ten ready-to-send manual test messages (see its README.md)
 site/                  public landing page, privacy policy, data-deletion page
+Dockerfile, deploy/    production image, compose + Caddy, rollback script, CloudFormation, runbook (deploy/README.md)
+.github/workflows/     ci.yml (tests + image build), deploy.yml (push to main -> ECR -> EC2 via SSM)
 ```
 
 ## Commands
@@ -50,7 +54,9 @@ Windows; use the venv interpreter.
 .venv/Scripts/python scripts/run_scenarios.py [ID-prefixes] [--show]   # ~91 live scenarios -> tests/scenarios/last_run.md
 .venv/Scripts/python scripts/make_scenario_assets.py              # builds the scenario media (needs ElevenLabs)
 .venv/Scripts/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000   # the server
-ngrok http 8000                                                   # public tunnel for Meta's webhook
+ngrok http 8000                                                   # public tunnel for Meta's webhook (local dev only)
+.venv/Scripts/python scripts/make_app_env.py                      # builds deploy/app.env (only the settings the app reads) for the server
+docker build -t infobot:test .                                    # the production image
 ```
 
 **The dev server is run without `--reload`. Restart it after any code or `.env` change.** An earlier `--reload` silently stopped reloading and the live bot ran stale code for hours.
@@ -62,7 +68,10 @@ Live runners spend real API quota. Gemini's free tier is 500 requests/day per ke
 - Match the surrounding code: comment density, naming, idiom. Comments explain why, not what.
 - Reuse existing helpers (`guard.sanitize_output`, `messages.pick`, `gemini.generate_json`, ...) rather than adding parallel ones.
 - Every user-facing string in Hindi/Marathi lives in `app/pipeline/messages.py` or a prompt, never inline in logic.
+- Replies use only WhatsApp markup (`*bold*`, `_italic_`, emoji, a divider); build them in `compose.py`, which strips `*_~` from user-derived and model text. A reply must be in one language: an untranslated explanation gets English labels (`ClaimOutcome.local_lang`).
+- Tests: `tests/conftest.py` stubs reply-language preferences and button sends for every test (`offline_prefs` fixture). The real `app.db.prefs` functions are stubbed too, so capture them at import time if you test the data layer.
 - New behaviour needs a unit test; a bug fix needs a regression test that fails without the fix.
+- Dependencies are pinned in `requirements.lock`, which production installs. After changing `requirements.txt`, regenerate it inside Linux, not from the Windows venv: `docker run --rm -v "$PWD:/w" -w /w python:3.12-slim sh -c "pip install -q -r requirements.txt && pip freeze > requirements.lock"`.
 - Do not add dependencies without a reason. `Pillow` is used only by the asset scripts and is not in `requirements.txt` (TODO - Needs confirmation: add to `requirements-dev.txt`).
 - Shell tooling trap: backslash escapes (`\n`) inside bash heredoc Python snippets get mangled into real newlines and break string literals. Use the Write/Edit tools for any code or data containing backslashes.
 

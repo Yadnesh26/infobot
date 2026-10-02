@@ -28,6 +28,7 @@
     <li><strong>Your phone number is never stored in readable form.</strong> We keep only a salted one-way hash of it, which lets us count repeat use and enforce a per-hour limit without keeping the number itself. WhatsApp's own message IDs contain an encoded copy of the sender's number, so we hash those the same way before storing them.</li>
     <li><strong>A record of each request:</strong> a one-way hash of the WhatsApp message ID, the hashed identifier, the type of message (text, image, audio, video), whether it was forwarded, whether the answer came from a previous check, a status, any technical error text, and timestamps.</li>
     <li><strong>The claim we checked and our answer:</strong> a short English statement of the claim we extracted from your message, the verdict, our explanation and the source links. These are kept so that the same rumour can be answered instantly next time, and so we can show which rumours are spreading. They are not attached to you, but if a message contains personal details that end up in the extracted claim, they would be in this text, so please do not forward private information.</li>
+    <li><strong>Your reply language:</strong> if you choose English, Hindi or Marathi, we store that choice against your hashed identifier so we can keep replying in it. Send <em>language</em> to change it.</li>
     <li><strong>Reactions:</strong> if you react to a reply with an emoji, we store the emoji against that request.</li>
   </ul>
   <p>We do <strong>not</strong> store the original text, images, audio or video you send. They are processed in memory or in a temporary file that is deleted straight away.</p>
@@ -36,9 +37,10 @@
   <p>To do its job, InfoBot sends your message content to the following services. Each handles it under its own terms and privacy policy:</p>
   <ul>
     <li><strong>Meta (WhatsApp Business Platform)</strong> delivers messages between you and us.</li>
-    <li><strong>Google (Gemini API)</strong> reads text out of images, works out the claim and helps produce the verdict.</li>
+    <li><strong>Google (Gemini API)</strong> reads text out of images, works out the claim and helps produce the verdict. While we use Google's free tier, Google's terms allow it to use content submitted through that tier to improve its products (this does not apply in the EEA, Switzerland or the UK).</li>
+    <li><strong>Groq</strong> runs a safety check on incoming text to catch attempts to manipulate the bot, acts as a backup when Google's service is unavailable, and is a backup transcription service for voice notes.</li>
     <li><strong>Tavily</strong> receives the text of the claim to search the web for sources.</li>
-    <li><strong>ElevenLabs</strong> transcribes voice notes and the audio of videos. A second transcription service may be used if it is unavailable.</li>
+    <li><strong>ElevenLabs</strong> transcribes voice notes and the audio of videos. Groq (above) may be used if it is unavailable.</li>
     <li><strong>Supabase</strong> hosts our database.</li>
   </ul>
   <p>We do not sell your data and do not use it for advertising.</p>

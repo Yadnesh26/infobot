@@ -28,12 +28,16 @@ async def claim_submission(
     return len(rows) > 0
 
 
-async def mark_submission(wamid: str, status: str, *, error: str | None = None, cache_hit: str | None = None) -> None:
+async def mark_submission(
+    wamid: str, status: str, *, error: str | None = None, cache_hit: str | None = None, latency_ms: int | None = None
+) -> None:
     body: dict = {"status": status}
     if error is not None:
         body["error"] = error
     if cache_hit is not None:
         body["cache_hit"] = cache_hit
+    if latency_ms is not None:
+        body["latency_ms"] = latency_ms
     await db.patch("submissions", {"wa_message_id": f"eq.{hash_id(wamid)}"}, body)
 
 

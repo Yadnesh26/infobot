@@ -19,8 +19,7 @@ import logging
 import re
 from dataclasses import dataclass
 
-import httpx
-
+from app import http
 from app.config import settings
 
 logger = logging.getLogger("infobot.guard")
@@ -112,9 +111,11 @@ async def _guard_score(text: str) -> float:
     if not chunks:
         return 0.0
 
-    async def one(client: httpx.AsyncClient, chunk: str) -> float:
-        resp = await client.post(
+    async def one(chunk: str) -> float:
+        resp = await http.post(
+            "groq",
             "https://api.groq.com/openai/v1/chat/completions",
+            timeout=10,
             headers={"Authorization": f"Bearer {settings.GROQ_API_KEY}"},
             json={"model": settings.PROMPT_GUARD_MODEL, "messages": [{"role": "user", "content": chunk}]},
         )
@@ -122,8 +123,7 @@ async def _guard_score(text: str) -> float:
         return float(resp.json()["choices"][0]["message"]["content"])
 
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            return max(await asyncio.gather(*[one(client, c) for c in chunks]))
+        return max(await asyncio.gather(*[one(c) for c in chunks]))
     except Exception:
         logger.warning("Prompt-guard call failed; continuing on pattern rules alone", exc_info=True)
         return 0.0

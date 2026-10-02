@@ -15,6 +15,7 @@ class InboundMessage:
     is_reaction: bool = False
     reaction_emoji: str | None = None
     reaction_target_wamid: str | None = None
+    button_id: str | None = None  # id of a tapped reply button (type "interactive")
 
 
 def extract_messages(payload: dict) -> list[InboundMessage]:
@@ -48,6 +49,10 @@ def _parse_one(msg: dict) -> InboundMessage:
             reaction_emoji=reaction.get("emoji"),
             reaction_target_wamid=reaction.get("message_id"),
         )
+
+    if msg_type == "interactive":
+        reply = msg.get("interactive", {}).get("button_reply", {})
+        return InboundMessage(wamid=msg["id"], sender=msg["from"], type="interactive", button_id=reply.get("id"))
 
     text = None
     media_id = None

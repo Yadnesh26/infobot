@@ -2,8 +2,7 @@ import asyncio
 import json
 import logging
 
-import httpx
-
+from app import http
 from app.config import settings
 
 logger = logging.getLogger("infobot.fallback_llm")
@@ -51,11 +50,12 @@ async def generate_json(prompt: str, schema: dict) -> dict:
     last_error: Exception | None = None
     for attempt, body in enumerate((strict, loose)):
         try:
-            async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-                resp = await client.post(_URL, headers={"Authorization": f"Bearer {settings.GROQ_API_KEY}"}, json=body)
-                if resp.status_code >= 400:
-                    raise FallbackError(f"Groq HTTP {resp.status_code}: {resp.text[:300]}")
-                content = resp.json()["choices"][0]["message"]["content"]
+            resp = await http.post(
+                "groq", _URL, timeout=_TIMEOUT, headers={"Authorization": f"Bearer {settings.GROQ_API_KEY}"}, json=body
+            )
+            if resp.status_code >= 400:
+                raise FallbackError(f"Groq HTTP {resp.status_code}: {resp.text[:300]}")
+            content = resp.json()["choices"][0]["message"]["content"]
             return json.loads(content)
         except Exception as exc:
             last_error = exc

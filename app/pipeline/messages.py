@@ -51,9 +51,9 @@ MEDIA_AUTHENTICITY = {
 
 UNREADABLE = {
     "image": {
-        "en": "I couldn't read any text in that image. If it carries a claim, please type it out or send a clearer screenshot.",
-        "hi": "इस इमेज में मुझे कोई पढ़ने लायक टेक्स्ट नहीं मिला। अगर इसमें कोई दावा है, तो उसे लिखकर भेजें या साफ़ स्क्रीनशॉट भेजें।",
-        "mr": "या इमेजमध्ये वाचता येईल असा मजकूर मला सापडला नाही. यात काही दावा असेल तर तो लिहून पाठवा किंवा स्पष्ट स्क्रीनशॉट पाठवा.",
+        "en": "I couldn't read any text in that image. It may be blurry, dark or cropped. If it carries a claim, please type it out or send a clearer picture.",
+        "hi": "इस इमेज में मुझे कोई पढ़ने लायक टेक्स्ट नहीं मिला। हो सकता है वह धुँधली, अँधेरी या कटी हुई हो। अगर इसमें कोई दावा है, तो उसे लिखकर भेजें या साफ़ तस्वीर भेजें।",
+        "mr": "या इमेजमध्ये वाचता येईल असा मजकूर मला सापडला नाही. ती कदाचित अस्पष्ट, अंधारी किंवा कापलेली असेल. यात काही दावा असेल तर तो लिहून पाठवा किंवा स्पष्ट फोटो पाठवा.",
     },
     "audio": {
         "en": "I couldn't make out any speech in that audio. Please send a clearer voice note, or type the claim.",
@@ -68,12 +68,6 @@ UNREADABLE = {
 }
 
 SEEN_IN_PHOTO = "I can see what looks like: {description}."
-
-MULTI_HEADER = {
-    "en": "I found {n} claims in your message. Here's what I checked:",
-    "hi": "आपके मैसेज में {n} दावे मिले। मैंने ये जाँचा:",
-    "mr": "तुमच्या मेसेजमध्ये {n} दावे आढळले. मी हे तपासले:",
-}
 
 MULTI_OMITTED = {
     "en": "There were more claims than I can check at once. Send the others separately and I'll check them too.",
@@ -167,38 +161,109 @@ KIND_FALLBACK = {
 
 # ---------------------------------------------------------------------------
 # Labels inside a verdict reply, so a Hindi or Marathi speaker isn't handed an
-# English frame around a translated explanation.
+# English frame around a translated explanation. WhatsApp formatting only:
+# *bold*, _italic_, plain emoji. (No headings or tables: WhatsApp has none.)
 # ---------------------------------------------------------------------------
 
-VERDICT_HEADER = {"en": "Verdict", "hi": "निष्कर्ष", "mr": "निष्कर्ष"}
-CONFIDENCE_WORD = {"en": "Confidence", "hi": "भरोसा", "mr": "विश्वासार्हता"}
-SOURCES_WORD = {"en": "Sources", "hi": "स्रोत", "mr": "स्रोत"}
+VERDICT_EMOJI = {"true": "✅", "false": "❌", "misleading": "⚠️", "unverifiable": "❓"}
 
 VERDICT_LABEL = {
-    "true": {"en": "True", "hi": "सही", "mr": "खरे"},
-    "false": {"en": "False", "hi": "गलत", "mr": "खोटे"},
-    "misleading": {"en": "Misleading", "hi": "भ्रामक", "mr": "दिशाभूल करणारे"},
-    "unverifiable": {"en": "Unverifiable", "hi": "सत्यापित नहीं हो सका", "mr": "पडताळणी करता आली नाही"},
+    "true": {"en": "TRUE", "hi": "सही", "mr": "खरे"},
+    "false": {"en": "FALSE", "hi": "गलत", "mr": "खोटे"},
+    "misleading": {"en": "MISLEADING", "hi": "भ्रामक", "mr": "दिशाभूल करणारे"},
+    "unverifiable": {"en": "UNVERIFIED", "hi": "सत्यापित नहीं हो सका", "mr": "पडताळणी करता आली नाही"},
 }
+
+CONFIDENCE_DOT = {"High": "🟢", "Medium": "🟡", "Low": "🔴"}
 CONFIDENCE_LEVEL = {
     "High": {"en": "High", "hi": "उच्च", "mr": "उच्च"},
     "Medium": {"en": "Medium", "hi": "मध्यम", "mr": "मध्यम"},
     "Low": {"en": "Low", "hi": "कम", "mr": "कमी"},
 }
-
-FOOTER = {"en": "— Verified by InfoBot", "hi": "— InfoBot द्वारा जाँचा गया", "mr": "— InfoBot ने तपासले"}
-FOOTER_GENERAL = {
-    "en": "— Verified by InfoBot (general-knowledge check only, no sources searched yet)",
-    "hi": "— InfoBot द्वारा जाँचा गया (सिर्फ़ सामान्य जानकारी के आधार पर, अभी स्रोत नहीं खोजे गए)",
-    "mr": "— InfoBot ने तपासले (फक्त सामान्य माहितीवर आधारित, अजून स्रोत शोधले नाहीत)",
+CONFIDENCE_LINE = {
+    "en": "{dot} *{level}* confidence",
+    "hi": "{dot} *{level}* भरोसा",
+    "mr": "{dot} *{level}* विश्वासार्हता",
 }
+
+CLAIM_WORD = {"en": "Claim", "hi": "दावा", "mr": "दावा"}
+WHY_WORD = {"en": "Why", "hi": "कारण", "mr": "कारण"}
+SOURCES_WORD = {"en": "Sources", "hi": "स्रोत", "mr": "स्रोत"}
+SUMMARY_HEADER = {
+    "en": "*{n} claims checked*",
+    "hi": "*{n} दावे जाँचे गए*",
+    "mr": "*{n} दावे तपासले*",
+}
+GUIDANCE_HEADER = {
+    "en": "ℹ️ *General guidance* (not a verdict)",
+    "hi": "ℹ️ *सामान्य जानकारी* (कोई निर्णय नहीं)",
+    "mr": "ℹ️ *सामान्य माहिती* (निर्णय नव्हे)",
+}
+NOTE_REST = {
+    "en": "About the rest of your message",
+    "hi": "आपके मैसेज के बाकी हिस्से के बारे में",
+    "mr": "तुमच्या मेसेजच्या उरलेल्या भागाबद्दल",
+}
+
+FOOTER = {"en": "InfoBot · fact-check", "hi": "InfoBot · फ़ैक्ट-चेक", "mr": "InfoBot · फॅक्ट-चेक"}
 FOOTER_GUIDANCE = {
-    "en": "— InfoBot (general guidance only, not a verdict)",
-    "hi": "— InfoBot (सिर्फ़ सामान्य जानकारी, कोई निर्णय नहीं)",
-    "mr": "— InfoBot (फक्त सामान्य माहिती, निर्णय नव्हे)",
+    "en": "InfoBot · general information only",
+    "hi": "InfoBot · सिर्फ़ सामान्य जानकारी",
+    "mr": "InfoBot · फक्त सामान्य माहिती",
 }
 FORWARDED = {
-    "en": "This message has been forwarded many times.",
-    "hi": "यह मैसेज कई बार फॉरवर्ड किया जा चुका है।",
-    "mr": "हा मेसेज अनेकदा फॉरवर्ड केला गेला आहे.",
+    "en": "📣 This message has been forwarded many times. Please check before sharing.",
+    "hi": "📣 यह मैसेज कई बार फॉरवर्ड हो चुका है। आगे भेजने से पहले जाँच लें।",
+    "mr": "📣 हा मेसेज अनेकदा फॉरवर्ड झाला आहे. पुढे पाठवण्यापूर्वी खात्री करा.",
+}
+
+
+def verdict_label(verdict: str, lang: str | None, *, bold_case: bool = True) -> str:
+    """'FALSE' for English headings, 'False' for the one-line summary; Hindi and
+    Marathi have no letter case."""
+    word = pick(VERDICT_LABEL[verdict], lang)
+    return word if bold_case else word.capitalize()
+
+
+# ---------------------------------------------------------------------------
+# Reply language: the choice menu and its confirmations. The menu is the one
+# message that is deliberately in all three languages, since it is how a
+# user who cannot read the others picks theirs.
+# ---------------------------------------------------------------------------
+
+LANGUAGE_NAMES = {"en": "English", "hi": "Hindi", "mr": "Marathi"}
+
+LANG_BUTTONS = [("lang_en", "English"), ("lang_hi", "हिन्दी"), ("lang_mr", "मराठी")]
+
+LANG_CHOOSER_BODY = (
+    "🌐 *Which language should I reply in?*\n"
+    "आप किस भाषा में जवाब चाहते हैं?\n"
+    "मी कोणत्या भाषेत उत्तर देऊ?"
+)
+
+LANG_SET = {
+    "en": "✅ Done. I'll reply in English from now on. Send *language* any time to change it.",
+    "hi": "✅ ठीक है। अब से मैं हिन्दी में जवाब दूँगा। बदलने के लिए कभी भी *भाषा* भेजें।",
+    "mr": "✅ ठीक आहे. आतापासून मी मराठीत उत्तर देईन. बदलण्यासाठी केव्हाही *भाषा* पाठवा.",
+}
+
+
+# One-line stand-ins in the multi-claim summary for outcomes that are not a verdict.
+SPECIAL_LABEL = {
+    "guidance": {"en": "ℹ️ General info, no verdict", "hi": "ℹ️ सामान्य जानकारी, कोई निर्णय नहीं", "mr": "ℹ️ सामान्य माहिती, निर्णय नाही"},
+    "refused": {"en": "⚕️ Medical, not answered here", "hi": "⚕️ चिकित्सा संबंधी, यहाँ उत्तर नहीं", "mr": "⚕️ वैद्यकीय, येथे उत्तर नाही"},
+    "error": {"en": "⏳ Couldn't check, try again", "hi": "⏳ जाँच नहीं हो सकी, फिर कोशिश करें", "mr": "⏳ तपासता आले नाही, पुन्हा प्रयत्न करा"},
+}
+
+
+RATE_LIMITED = {
+    "en": "You've sent quite a few messages in the last hour, so please wait a little before sending more.",
+    "hi": "आपने पिछले एक घंटे में काफ़ी मैसेज भेजे हैं। कृपया थोड़ा रुककर फिर भेजें।",
+    "mr": "तुम्ही गेल्या तासात खूप मेसेज पाठवले आहेत. कृपया थोडा वेळ थांबून पुन्हा पाठवा.",
+}
+
+GENERIC_ERROR = {
+    "en": "Sorry, something went wrong on my side while handling that message. Please try again.",
+    "hi": "माफ़ कीजिए, इस मैसेज को सँभालते समय मुझसे कुछ गड़बड़ हो गई। कृपया फिर कोशिश करें।",
+    "mr": "क्षमस्व, हा मेसेज हाताळताना माझ्याकडून काहीतरी चुकले. कृपया पुन्हा प्रयत्न करा.",
 }

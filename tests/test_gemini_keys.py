@@ -30,12 +30,12 @@ def _patch_http(monkeypatch, responses_by_key, calls):
         async def __aexit__(self, *a):
             return False
 
-        async def post(self, url, headers=None, json=None):
+        async def post(self, url, headers=None, json=None, timeout=None):
             key = headers["x-goog-api-key"]
             calls.append(key)
             return responses_by_key[key]
 
-    monkeypatch.setattr("app.providers.gemini.httpx.AsyncClient", FakeClient)
+    monkeypatch.setattr("httpx.AsyncClient", FakeClient)
 
 
 @pytest.fixture(autouse=True)
@@ -47,7 +47,7 @@ def two_keys(monkeypatch):
     gemini._cooldown_until.clear()
 
 
-OK = {"steps": [{"type": "model_output", "content": [{"type": "text", "text": "{\"a\": 1}"}]}]}
+OK = {"candidates": [{"content": {"parts": [{"text": "{\"a\": 1}"}]}}]}
 QUOTA_DAY = '{"error":{"message":"Rate limit exceeded (limit: 500 requests per day on Free Tier)"}}'
 QUOTA_MIN = '{"error":{"message":"Rate limit exceeded, please retry in 3s"}}'
 
@@ -77,6 +77,9 @@ async def test_a_daily_quota_sits_out_longer_than_a_per_minute_one(monkeypatch):
     await gemini.generate_json("x", {})
     daily = gemini._cooldown_until["primary-key"]
     gemini._cooldown_until.clear()
+    from app import http
+
+    http.reset()  # the first fake client is still pooled; start the second scenario on a new one
     _patch_http(monkeypatch, {"primary-key": FakeResponse(429, text=QUOTA_MIN), "second-key": FakeResponse(200, OK)}, calls)
     await gemini.generate_json("x", {})
     assert daily > gemini._cooldown_until["primary-key"]
@@ -156,9 +159,13 @@ def test_provider_outage_reply_follows_the_users_language():
     assert _failure_reply(FallbackError("x"), _msg("क्या पेट्रोल 200 रुपये हो गया है?")) == messages.BUSY["hi"]
 
 
-def test_provider_outage_with_no_text_shows_every_language():
-    reply = _failure_reply(GeminiError("x"), _msg())
-    assert messages.BUSY["en"] in reply and messages.BUSY["hi"] in reply and messages.BUSY["mr"] in reply
+def test_provider_outage_with_no_text_is_english_only_not_three_languages_stacked():
+    assert _failure_reply(GeminiError("x"), _msg()) == messages.BUSY["en"]
+
+
+def test_a_chosen_language_decides_the_failure_reply_whatever_the_message_looks_like():
+    assert _failure_reply(GeminiError("x"), _msg("Is this true?"), "mr") == messages.BUSY["mr"]
+    assert _failure_reply(KeyError("bug"), _msg("hello"), "hi") == messages.GENERIC_ERROR["hi"]
 
 
 def test_a_genuine_bug_keeps_the_generic_apology():

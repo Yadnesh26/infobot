@@ -12,10 +12,10 @@ from app.pipeline.compose import (
     compose_claims_reply,
     compose_nonclaim_reply,
 )
-from app.pipeline.guard import screen_text
+from app.pipeline.guard import MAX_INPUT_CHARS, clean_text, guess_language, screen_text
 from app.pipeline.messages import UNCLEAR, pick
 from app.pipeline.normalize import normalize_text
-from app.pipeline.verify import verify_t1, verify_t2, verify_t3a
+from app.pipeline.verify import translate_texts, verify_t1, verify_t2, verify_t3a
 from app.providers.gemini import embed_text
 
 logger = logging.getLogger("infobot.pipeline")
@@ -44,66 +44,90 @@ async def _embed(text: str) -> list[float] | None:
         return None
 
 
-async def _cached_outcome(text_hash: str | None, embedding: list[float] | None) -> tuple[dict | None, str | None]:
-    row = await db_cache.lookup_exact(text_hash) if text_hash else None
-    if row:
-        await db_cache.increment_seen(row["id"])
-        return row, "exact"
-    if embedding is not None:
-        row = await db_cache.lookup_semantic(embedding, settings.SEMANTIC_MATCH_THRESHOLD)
-        if row:
-            await db_cache.increment_seen(row["id"])
-            return row, "semantic"
-    return None, None
+async def _none() -> None:
+    return None
 
 
-def _outcome_from_row(claim: Claim, row: dict, hit: str) -> ClaimOutcome:
+def _language_of_text(target: str, english: str, local: str) -> str:
+    """Which language `local` is really in. A model that failed to translate hands
+    back the English text, and labelling that as Hindi would mix the two."""
+    return target if (target == "en" or local != english) else "en"
+
+
+async def _outcome_from_row(claim: Claim, row: dict, hit: str, target: str) -> ClaimOutcome:
+    """A cached answer, translated for the user if they read another language
+    (the cache stores English only)."""
     explanation = row.get("explanation_en") or ""
+    local = explanation
+    if target != "en" and explanation and row.get("verdict") != "refused":
+        local = (await translate_texts([explanation], target))[0]
     return ClaimOutcome(
         claim=claim,
         tier=row.get("tier") or claim.tier,
         verdict=row.get("verdict", ""),
         confidence=row.get("confidence"),
         explanation_en=explanation,
-        explanation_local=explanation,
+        explanation_local=local,
         sources=row.get("sources") or [],
         cache_hit=hit,
+        local_lang=_language_of_text(target, explanation, local),
     )
 
 
-async def _verify_claim(claim: Claim) -> ClaimOutcome:
+async def _verify_claim(claim: Claim, reply_lang: str | None = None) -> ClaimOutcome:
     tier = claim.tier
     lang = claim.language
+    target = reply_lang or lang
     if tier == "t1":
-        v = await verify_t1(claim.claim_english, claim.claim_original, lang)
-        return ClaimOutcome(claim, tier, v.verdict, v.confidence, v.explanation_english, v.explanation_original_language, [])
-    if tier == "t2":
-        v = await verify_t2(claim.claim_english, claim.claim_original, lang, claim.search_query, claim.search_query_original)
-        return ClaimOutcome(claim, tier, v.verdict, v.confidence, v.explanation_english, v.explanation_original_language, v.sources)
-    if tier == "t3a":
-        t = await verify_t3a(claim.claim_english, claim.claim_original, lang)
+        v = await verify_t1(claim.claim_english, claim.claim_original, lang, reply_lang)
+        o = ClaimOutcome(claim, tier, v.verdict, v.confidence, v.explanation_english, v.explanation_original_language, [])
+    elif tier == "t2":
+        v = await verify_t2(
+            claim.claim_english, claim.claim_original, lang, claim.search_query, claim.search_query_original, reply_lang
+        )
+        o = ClaimOutcome(claim, tier, v.verdict, v.confidence, v.explanation_english, v.explanation_original_language, v.sources)
+    elif tier == "t3a":
+        t = await verify_t3a(claim.claim_english, claim.claim_original, lang, reply_lang)
         if t.needs_escalation:
             # Runtime self-test per the plan: classify-time tier assignment can be
             # wrong, and a t3a answer that turns out to depend on the person's
             # age/conditions/medications must never be forced out anyway.
             return ClaimOutcome(claim, "t3b", "refused")
-        return ClaimOutcome(claim, tier, "guidance", None, t.guidance_english, t.guidance_original_language, [])
-    return ClaimOutcome(claim, "t3b", "refused")
+        o = ClaimOutcome(claim, tier, "guidance", None, t.guidance_english, t.guidance_original_language, [])
+    else:
+        return ClaimOutcome(claim, "t3b", "refused")
+    o.local_lang = _language_of_text(target, o.explanation_en, o.explanation_local)
+    return o
 
 
-async def _resolve_claim(claim: Claim, single: bool, text_hash: str, cacheable: bool) -> ClaimOutcome:
+async def _resolve_claim(
+    claim: Claim, single: bool, text_hash: str, cacheable: bool, reply_lang: str | None = None
+) -> ClaimOutcome:
     """Cache lookup, then verification, for one claim. For a one-claim message
     the claim is stored under the whole message's hash so an identical forward
     is answered before classification; for several claims each is keyed by its
     own English text."""
     claim_hash = text_hash if single else db_cache.hash_claim(claim.claim_english)
-    embedding = await _embed(claim.claim_english)
+    target = reply_lang or claim.language or "en"
 
-    row, hit = await _cached_outcome(claim_hash, embedding)
+    # The embedding (needed for the semantic lookup and for a cache write) is requested while
+    # the exact lookup is still in flight. A single claim was already looked up by its message
+    # hash before classification, and missed, so that lookup is not repeated.
+    embed_task = asyncio.create_task(_embed(claim.claim_english))
+    row = None if single else await db_cache.lookup_exact(claim_hash)
     if row:
-        return _outcome_from_row(claim, row, hit)
+        embed_task.cancel()
+        await db_cache.increment_seen(row["id"])
+        return await _outcome_from_row(claim, row, "exact", target)
 
-    outcome = await _verify_claim(claim)
+    embedding = await embed_task
+    if embedding is not None:
+        row = await db_cache.lookup_semantic(embedding, settings.SEMANTIC_MATCH_THRESHOLD)
+        if row:
+            await db_cache.increment_seen(row["id"])
+            return await _outcome_from_row(claim, row, "semantic", target)
+
+    outcome = await _verify_claim(claim, reply_lang)
 
     # Don't cache "unverifiable" -- unlike a real verdict, it's a statement about
     # today's available sources, not the claim itself. "guidance" and "refused"
@@ -123,31 +147,54 @@ async def _resolve_claim(claim: Claim, single: bool, text_hash: str, cacheable: 
     return outcome
 
 
-async def run_text_pipeline(raw_text: str, frequently_forwarded: bool, allow_cache: bool = True) -> PipelineResult:
+async def run_text_pipeline(
+    raw_text: str, frequently_forwarded: bool, allow_cache: bool = True, reply_lang: str | None = None
+) -> PipelineResult:
+    """reply_lang is the user's chosen reply language (en/hi/mr) or None; when
+    None, each answer follows the language of the claim it answers."""
     text = normalize_text(raw_text)
 
-    guard = await screen_text(text)
-    meta: dict = {"suspicious": guard.suspicious, "guard_score": round(guard.guard_score, 3)}
+    # The injection screen and the exact-cache lookup are independent, so they run together;
+    # a blocked message is still refused whatever the cache holds. (The screen cleans the text
+    # first, so the lookup is keyed on the same cleaned text.)
+    cleaned = clean_text(text)[0][:MAX_INPUT_CHARS].strip()
+    pre_hash = db_cache.hash_claim(cleaned) if cleaned else None
+    guard, exact = await asyncio.gather(
+        screen_text(text), db_cache.lookup_exact(pre_hash) if pre_hash else _none()
+    )
+    meta: dict = {"suspicious": guard.suspicious, "guard_score": round(guard.guard_score, 3), "reply_lang": reply_lang}
     if guard.blocked:
         logger.warning("Blocked input (%s)", guard.reason)
         meta.update(blocked=guard.reason, input_kind="abusive_or_manipulation")
-        return PipelineResult(compose_blocked_reply(guard.text), meta=meta)
+        return PipelineResult(compose_blocked_reply(guard.text, reply_lang), meta=meta)
     if not guard.text:
         meta["input_kind"] = "unclear"
-        return PipelineResult(pick(UNCLEAR, "en"), meta=meta)
+        return PipelineResult(pick(UNCLEAR, reply_lang or "en"), meta=meta)
 
     cacheable = allow_cache and not guard.suspicious
     text = guard.text
     text_hash = db_cache.hash_claim(text)
 
     # Identical forward already answered: skip classification entirely.
-    exact = await db_cache.lookup_exact(text_hash)
+    if text_hash != pre_hash:  # defensive: the screen never changes what it cleaned, but never trust that silently
+        exact = await db_cache.lookup_exact(text_hash)
     if exact:
         await db_cache.increment_seen(exact["id"])
         meta.update(input_kind="claims", n_claims=1)
-        return PipelineResult(compose_cached_reply(exact, frequently_forwarded), cache_hit="exact", meta=meta)
+        # Classification was skipped, so the only clue to the language is the user's
+        # choice, or else the script of what they sent.
+        target = reply_lang or guess_language(text)
+        if target != "en" and exact.get("verdict") != "refused":
+            original = [exact.get("claim_text_en") or "", exact.get("explanation_en") or ""]
+            headline, explanation = await translate_texts(original, target)
+            if explanation == original[1]:
+                target = "en"  # translation failed: English text gets English labels, never a mix
+            exact = {**exact, "claim_text_en": headline, "explanation_en": explanation}
+        else:
+            target = "en"
+        return PipelineResult(compose_cached_reply(exact, frequently_forwarded, target), cache_hit="exact", meta=meta)
 
-    classify: ClassifyResult = await extract_and_classify(text, frequently_forwarded)
+    classify: ClassifyResult = await extract_and_classify(text, frequently_forwarded, reply_lang)
     meta.update(
         input_kind=classify.input_kind,
         n_claims=len(classify.claims),
@@ -157,11 +204,11 @@ async def run_text_pipeline(raw_text: str, frequently_forwarded: bool, allow_cac
     )
 
     if not classify.is_verifiable_claim:
-        return PipelineResult(compose_nonclaim_reply(classify), meta=meta)
+        return PipelineResult(compose_nonclaim_reply(classify, reply_lang), meta=meta)
 
     single = len(classify.claims) == 1
     results = await asyncio.gather(
-        *[_resolve_claim(c, single, text_hash, cacheable) for c in classify.claims],
+        *[_resolve_claim(c, single, text_hash, cacheable, reply_lang) for c in classify.claims],
         return_exceptions=True,
     )
 
@@ -184,7 +231,7 @@ async def run_text_pipeline(raw_text: str, frequently_forwarded: bool, allow_cac
     hits = {o.cache_hit for o in outcomes}
     all_cached = None not in hits
     return PipelineResult(
-        compose_claims_reply(outcomes, classify, frequently_forwarded),
+        compose_claims_reply(outcomes, classify, frequently_forwarded, reply_lang),
         cache_hit=outcomes[0].cache_hit if all_cached and len(hits) == 1 else None,
         pending_claim_writes=[o.write for o in outcomes if o.write],
         meta=meta,

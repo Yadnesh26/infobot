@@ -1,5 +1,4 @@
-import httpx
-
+from app import http
 from app.config import settings
 
 _BASE_URL = "https://graph.facebook.com"
@@ -27,14 +26,35 @@ async def send_text_reply(to: str, body: str, reply_to_wamid: str) -> dict:
         "type": "text",
         "text": {"preview_url": True, "body": body},
     }
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(
-            _url(f"{settings.WA_PHONE_NUMBER_ID}/messages"),
-            headers=_headers(),
-            json=payload,
-        )
-        resp.raise_for_status()
-        return resp.json()
+    resp = await http.post(
+        "meta", _url(f"{settings.WA_PHONE_NUMBER_ID}/messages"), timeout=30, headers=_headers(), json=payload
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+async def send_reply_buttons(to: str, body: str, buttons: list[tuple[str, str]]) -> dict:
+    """Send up to three tap-to-reply buttons as (id, title) pairs. WhatsApp allows
+    at most 3 buttons and 20 characters per title. Free inside the 24-hour window
+    a user's own message opens."""
+    if not 1 <= len(buttons) <= 3:
+        raise ValueError("WhatsApp reply buttons take between one and three buttons")
+    payload = {
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "to": to,
+        "type": "interactive",
+        "interactive": {
+            "type": "button",
+            "body": {"text": body},
+            "action": {"buttons": [{"type": "reply", "reply": {"id": bid, "title": title[:20]}} for bid, title in buttons]},
+        },
+    }
+    resp = await http.post(
+        "meta", _url(f"{settings.WA_PHONE_NUMBER_ID}/messages"), timeout=30, headers=_headers(), json=payload
+    )
+    resp.raise_for_status()
+    return resp.json()
 
 
 async def mark_read(wamid: str) -> None:
@@ -43,26 +63,21 @@ async def mark_read(wamid: str) -> None:
         "status": "read",
         "message_id": wamid,
     }
-    async with httpx.AsyncClient(timeout=10) as client:
-        resp = await client.post(
-            _url(f"{settings.WA_PHONE_NUMBER_ID}/messages"),
-            headers=_headers(),
-            json=payload,
-        )
-        resp.raise_for_status()
+    resp = await http.post(
+        "meta", _url(f"{settings.WA_PHONE_NUMBER_ID}/messages"), timeout=10, headers=_headers(), json=payload
+    )
+    resp.raise_for_status()
 
 
 async def get_media_url(media_id: str) -> str:
-    async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.get(_url(media_id), headers=_headers())
-        resp.raise_for_status()
-        return resp.json()["url"]
+    resp = await http.get("meta", _url(media_id), timeout=15, headers=_headers())
+    resp.raise_for_status()
+    return resp.json()["url"]
 
 
 async def download_media(media_id: str) -> bytes:
     """Two-step download: resolve the short-lived URL, then fetch with auth."""
     url = await get_media_url(media_id)
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.get(url, headers=_headers())
-        resp.raise_for_status()
-        return resp.content
+    resp = await http.get("meta", url, timeout=30, headers=_headers())
+    resp.raise_for_status()
+    return resp.content

@@ -112,7 +112,7 @@ def _patch_common(monkeypatch, sent, *, is_new=True):
         )
         return {"messages": [{"id": "wamid.REPLY"}]}
 
-    async def fake_run_text_pipeline(raw_text, frequently_forwarded):
+    async def fake_run_text_pipeline(raw_text, frequently_forwarded, **_kw):
         sent["pipeline_input"] = raw_text
         return PipelineResult("FAKE VERDICT REPLY")
 
@@ -217,7 +217,7 @@ def _patch_download(monkeypatch, payload=b"fake-bytes"):
 def _patch_pipeline(monkeypatch, seen):
     from app.pipeline.orchestrator import PipelineResult
 
-    async def fake_run_text_pipeline(raw_text, frequently_forwarded):
+    async def fake_run_text_pipeline(raw_text, frequently_forwarded, **_kw):
         seen["text"] = raw_text
         return PipelineResult("PIPELINE REPLY")
 
@@ -257,7 +257,7 @@ async def test_compose_image_reply_photo_only_describes_and_explains_limits(monk
 
 
 @pytest.mark.anyio
-async def test_compose_image_reply_with_nothing_at_all_says_so_in_all_languages(monkeypatch):
+async def test_compose_image_reply_with_nothing_at_all_asks_for_a_clearer_image_in_one_language(monkeypatch):
     _patch_download(monkeypatch)
 
     async def fake_normalize_image(image_bytes, mime_type, caption):
@@ -267,7 +267,28 @@ async def test_compose_image_reply_with_nothing_at_all_says_so_in_all_languages(
 
     result = await _compose_image_reply(_img_msg())
     assert "couldn't read any text" in result.reply_text
-    assert "पढ़ने लायक" in result.reply_text  # Hindi follows
+    # Regression: an unknown language used to stack English, Hindi and Marathi.
+    assert "पढ़ने लायक" not in result.reply_text and "वाचता येईल" not in result.reply_text
+
+    hindi = await _compose_image_reply(_img_msg(), "hi")
+    assert "पढ़ने लायक" in hindi.reply_text and "couldn't read" not in hindi.reply_text
+
+
+@pytest.mark.anyio
+async def test_a_blurry_image_is_not_answered_with_the_cannot_judge_authenticity_text(monkeypatch):
+    """Regression from manual testing: a blurred poster got 'I can't tell whether a
+    photo is genuine...' instead of a request for a clearer picture."""
+    _patch_download(monkeypatch)
+
+    async def fake_normalize_image(image_bytes, mime_type, caption):
+        return ImageReading(text=None, description="A heavily blurred image", kind="unreadable")
+
+    monkeypatch.setattr("app.main.normalize_image", fake_normalize_image)
+
+    result = await _compose_image_reply(_img_msg())
+    assert "Google Lens" not in result.reply_text
+    assert "clearer" in result.reply_text
+    assert result.meta["input_kind"] == "unreadable"
 
 
 @pytest.mark.anyio
@@ -490,7 +511,7 @@ def test_post_webhook_rejects_over_rate_limit(monkeypatch):
     assert resp.status_code == 200
     assert "pipeline_input" not in sent  # pipeline never ran
     assert len(sent["send_calls"]) == 1
-    assert "wait a bit" in sent["send_calls"][0]["body"]
+    assert "wait a little" in sent["send_calls"][0]["body"]
     assert sent["marked_status"] == "rate_limited"
 
 
@@ -554,3 +575,24 @@ def test_trending_endpoint_returns_data_from_db(monkeypatch):
     resp = client.get("/trending")
     assert resp.status_code == 200
     assert resp.json()[0]["claim_text_en"] == "x"
+
+
+@pytest.mark.anyio
+async def test_when_vision_fails_and_the_caption_holds_no_claim_the_user_is_told_we_could_not_read_the_image(monkeypatch):
+    """Regression: a poster with the caption 'Is this true?' got 'I couldn't pick out a specific
+    claim' when the real problem was that the image could not be read."""
+    from app.pipeline.orchestrator import PipelineResult
+    from app.providers.gemini import GeminiError
+
+    _patch_download(monkeypatch)
+
+    async def vision_down(image_bytes, mime_type, caption):
+        raise GeminiError("timeout")
+
+    async def caption_only(raw_text, frequently_forwarded, **_kw):
+        return PipelineResult("I couldn't pick out a specific claim", meta={"input_kind": "unclear"})
+
+    monkeypatch.setattr("app.main.normalize_image", vision_down)
+    monkeypatch.setattr("app.main.run_text_pipeline", caption_only)
+    result = await _compose_image_reply(_img_msg(caption="Is this true? Please check"))
+    assert "overloaded" in result.reply_text and result.meta["input_kind"] == "vision_unavailable"

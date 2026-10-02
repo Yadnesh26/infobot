@@ -1,7 +1,7 @@
+import asyncio
 import logging
 
-import httpx
-
+from app import http
 from app.config import settings
 
 logger = logging.getLogger("infobot.tavily")
@@ -48,21 +48,17 @@ async def search(query: str, max_results: int = 5, include_domains: list[str] | 
     if len(query) > _MAX_QUERY_CHARS:
         query = query[:_MAX_QUERY_CHARS]
 
-    body = {"query": query, "search_depth": "basic", "max_results": max_results}
+    body = {"query": query, "search_depth": settings.TAVILY_SEARCH_DEPTH, "max_results": max_results}
     if include_domains:
         body["include_domains"] = include_domains
     else:
         body["exclude_domains"] = _SOCIAL_ECHO_DOMAINS
 
-    async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-        resp = await client.post(
-            _URL,
-            headers={"Authorization": f"Bearer {settings.TAVILY_API_KEY}"},
-            json=body,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-    return data.get("results", [])
+    resp = await http.post(
+        "tavily", _URL, timeout=_TIMEOUT, headers={"Authorization": f"Bearer {settings.TAVILY_API_KEY}"}, json=body
+    )
+    resp.raise_for_status()
+    return resp.json().get("results", [])
 
 
 async def search_for_claim(claim_english: str, claim_original: str, detected_language: str) -> list[dict]:
@@ -84,10 +80,22 @@ async def search_for_claim(claim_english: str, claim_original: str, detected_lan
                 seen_urls.add(url)
                 results.append(r)
 
-    for q in queries:
-        _add(await search(q, max_results=5))
+    # The searches do not depend on each other, so they run together (each costs 1-4 s from
+    # India; one after another they were the slowest part of a search-based answer). The last
+    # is one extra pass biased toward known fact-check/health-authority domains.
+    searches = [search(q, max_results=5) for q in queries]
+    searches.append(search(queries[0], max_results=5, include_domains=_FACT_CHECK_DOMAINS))
+    outcomes = await asyncio.gather(*searches, return_exceptions=True)
 
-    # One extra pass biased toward known fact-check/health-authority domains.
-    _add(await search(queries[0], max_results=5, include_domains=_FACT_CHECK_DOMAINS))
+    failures = [o for o in outcomes if isinstance(o, BaseException)]
+    if len(failures) == len(outcomes):
+        raise failures[0]  # nothing came back at all: let the caller treat it as a failure
+    for failure in failures:
+        logger.warning("One Tavily search failed; using the others: %r", failure)
+
+    # Same order as before (general, original language, fact-check), so the best results lead.
+    for rows in outcomes:
+        if not isinstance(rows, BaseException):
+            _add(rows)
 
     return results

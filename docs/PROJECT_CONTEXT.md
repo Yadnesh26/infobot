@@ -12,7 +12,9 @@ Public site (landing, privacy policy, data deletion) in `site/`, deployed on Net
 
 ```
 Meta webhook POST /webhook  (HMAC signature check, 200 immediately, work in a background task)
-  -> idempotency (hashed wamid unique) -> per-user hourly rate limit (Postgres function) -> read receipt
+  -> idempotency (hashed wamid unique) -> load the user's reply language (user_prefs)
+  -> language request? (tapped button, or exact text `language` / `भाषा` / a language name): handle it and stop
+  -> per-user hourly rate limit (Postgres function) -> read receipt
   -> media to labelled text (main.py + normalize.py):
        image : Gemini vision -> [Text inside the image] / [Caption...] / [What the image shows]
        audio : ElevenLabs Scribe -> cleaned transcript -> [Voice note transcript] (+ caption)
@@ -25,6 +27,8 @@ Meta webhook POST /webhook  (HMAC signature check, 200 immediately, work in a ba
        claims -> per claim, in parallel: cache (exact, then semantic) -> verify by tier -> ClaimOutcome
   -> compose (one verdict card, or numbered blocks for several claims; localised labels; fits 4096 chars)
   -> send as a contextual reply -> only then write cache rows -> mark submission done
+  -> first contact only: send the three language buttons (once)
+  reply_lang (the user's choice, or None = follow each claim's own language) flows to classify, verify, cache-hit translation and compose
 ```
 
 Tiers: T1 model knowledge (confidence capped 60/25, never High); T2 Tavily search with structural confidence from distinct agreeing domains (85/55/20; no sources forces "unverifiable"); T3a soft general health guidance, no verdict, escalates to T3b at runtime if the answer depends on the person; T3b static hard stop. Input kinds that are not claims: greeting, question_about_bot, opinion_or_prediction, personal_or_private, out_of_scope_request, health_advice_request (-> T3b text), media_authenticity, unclear, abusive_or_manipulation.
@@ -45,7 +49,7 @@ Gemini keys rotate on a 429 with a cooldown (30 s per-minute, 10 min daily); at 
 
 ## Data (Supabase)
 
-`claims` (cache: hash, English text, embedding, tier, verdict incl. `guidance`/`refused`, confidence, explanation_en, sources, times_seen), `submissions` (hashed wamid and phone, status, reply wamid, cache_hit, error), `feedback` (reactions joined to replies), rate-limit counters behind an `increment_rate_limit` RPC, and a trending query. `match_claims` RPC does the pgvector search (threshold 0.90). Schema details: TODO - Needs confirmation (no migration files are in the repo; the schema was applied to Supabase directly).
+`user_prefs` (hashed number -> chosen reply language, `prompted` flag; SQL in `db/migrations/001_user_prefs.sql`), `claims` (cache: hash, English text, embedding, tier, verdict incl. `guidance`/`refused`, confidence, explanation_en, sources, times_seen), `submissions` (hashed wamid and phone, status, reply wamid, cache_hit, error), `feedback` (reactions joined to replies), rate-limit counters behind an `increment_rate_limit` RPC, and a trending query. `match_claims` RPC does the pgvector search (threshold 0.90). Schema details: TODO - Needs confirmation (no migration files are in the repo; the schema was applied to Supabase directly).
 
 ## Privacy design
 
@@ -53,14 +57,15 @@ Raw phone numbers and message IDs are never stored or logged, only salted hashes
 
 ## Current technical state (2026-10-01)
 
-- Runs locally (laptop) behind ngrok; there is no production host yet (TODO - Needs confirmation).
+- Still runs locally (laptop) behind ngrok. A deployment to one EC2 instance (Docker + Caddy, images in ECR, GitHub Actions over OIDC/SSM) is built and tested locally but **not yet deployed**; see `deploy/README.md` and DECISION-017. AWS region and domain: TODO - Needs confirmation.
 - Gemini key 1 is at its free daily cap; key 2 is live. Billing is not enabled. Cost estimate measured on 5 messages: about $0.001-0.0035 per fresh message at $0.25/$1.50 per million tokens.
-- Large set of changes (multi-claim pipeline, injection guard, localisation, key rotation, tests) is **uncommitted**; see `docs/PROGRESS.md`.
-- Tests: 220 offline. Live: 15/15 tier fixtures; last full scenario run 91/91 (before the final classify-prompt edit; the medical/non-claim subset re-run was cut short by quota).
+- The reply redesign (language preference, WhatsApp formatting, mixed-message handling, blurred-image reply) is **uncommitted**; see `docs/PROGRESS.md`.
+- Tests: 305 offline. Live: 15/15 tier fixtures; last full scenario run 91/91 (before the final classify-prompt edit; the medical/non-claim subset re-run was cut short by quota).
 
 ## Known limitations
 
-- Cache hits answer in English only (only the English explanation is stored).
+- Cache hits are translated on the fly for non-English readers (20 s cap; falls back to English text with English labels).
+- The interactive language buttons have not yet been seen on a real phone.
 - Photos/videos cannot be judged for authenticity (no reverse image search); the bot says so and points to Google Lens/TinEye.
 - Scribe can invent words from mumbled audio; there is no confidence gate yet.
 - Pending work and ideas: `docs/TASKS.md`.

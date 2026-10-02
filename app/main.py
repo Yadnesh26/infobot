@@ -1,24 +1,30 @@
+import asyncio
 import json
 import logging
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import BackgroundTasks, FastAPI, Request, Response
 from fastapi.responses import PlainTextResponse
 
+from app import http
 from app.config import settings
 from app.db import cache as db_cache
 from app.db import feedback as db_feedback
+from app.db import prefs as db_prefs
 from app.db import rate_limit as db_rate_limit
 from app.db import submissions as db_submissions
 from app.db import trending as db_trending
+from app.pipeline import language
 from app.pipeline.compose import (
     compose_busy,
     compose_photo_only,
     compose_too_long,
     compose_unreadable_media,
+    compose_unsupported,
 )
-from app.pipeline.guard import MAX_AV_BYTES, MAX_IMAGE_BYTES
-from app.pipeline.messages import CAPABILITY, NOT_A_CLAIM_FALLBACK, all_langs
+from app.pipeline.guard import MAX_AV_BYTES, MAX_IMAGE_BYTES, guess_language
+from app.pipeline.messages import BUSY, GENERIC_ERROR, LANG_BUTTONS, LANG_CHOOSER_BODY, LANG_SET, RATE_LIMITED, pick
 from app.pipeline.normalize import (
     AudioTooLongError,
     MediaUnreadableError,
@@ -31,7 +37,7 @@ from app.pipeline.orchestrator import PipelineResult, run_text_pipeline
 from app.providers.fallback_llm import FallbackError
 from app.providers.gemini import GeminiError
 from app.util import hash_phone, ref
-from app.whatsapp.client import download_media, mark_read, send_text_reply
+from app.whatsapp.client import download_media, mark_read, send_reply_buttons, send_text_reply
 from app.whatsapp.parser import InboundMessage, extract_messages
 from app.whatsapp.verify import valid_signature
 
@@ -43,11 +49,25 @@ logger = logging.getLogger("infobot")
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    # Open a connection to each service now, in the background, so the first message after a
+    # start does not pay for the handshakes (0.1-0.45 s each from India).
+    warm_task = asyncio.create_task(
+        http.warm({
+            "gemini": "https://generativelanguage.googleapis.com/",
+            "supabase": f"{settings.SUPABASE_URL}/rest/v1/",
+            "meta": "https://graph.facebook.com/",
+            "groq": "https://api.groq.com/",
+            "tavily": "https://api.tavily.com/",
+            "elevenlabs": "https://api.elevenlabs.io/",
+        })
+    )
     try:
         await db_submissions.abandon_stale_pending()
     except Exception:
         logger.exception("Startup sweep of stale pending submissions failed")
     yield
+    warm_task.cancel()
+    await http.close_all()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -95,7 +115,16 @@ async def receive_webhook(request: Request, bg: BackgroundTasks):
     return Response(status_code=200)
 
 
+async def _mark_read_quietly(msg: InboundMessage) -> None:
+    try:
+        await mark_read(msg.wamid)
+    except Exception:
+        logger.warning("mark_read failed for wamid=%s, continuing", ref(msg.wamid), exc_info=True)
+
+
 async def handle_message(msg: InboundMessage) -> None:
+    reply_lang: str | None = None  # the user's chosen language, once we know it
+    started = time.perf_counter()
     try:
         if msg.is_reaction:
             await _handle_reaction(msg)
@@ -114,29 +143,46 @@ async def handle_message(msg: InboundMessage) -> None:
             logger.info("Dropping duplicate delivery of %s", ref(msg.wamid))
             return
 
-        # Cap per-user throughput before spending anything on the pipeline --
-        # one user forwarding their whole chat history shouldn't exhaust the
-        # daily Gemini/ElevenLabs/Tavily quota for everyone else.
-        under_limit = await db_rate_limit.check_and_increment(wa_user_hash)
+        # Changing the reply language costs no model call, so it is handled before the
+        # rate limit and never runs the pipeline.
+        action = language.from_button(msg.button_id) if msg.type == "interactive" else language.parse_command(msg.text)
+        if msg.type == "interactive" and not action:
+            await db_submissions.mark_submission(msg.wamid, "done")  # some other button; nothing to do
+            return
+        if action:
+            prefs = await db_prefs.get(wa_user_hash)
+            reply_lang = prefs["language"]
+            await _handle_language_request(msg, wa_user_hash, action, reply_lang)
+            return
+
+        # The preference lookup and the rate-limit check do not depend on each other, so
+        # they share one round trip. The rate limit caps per-user throughput before
+        # anything expensive runs: one user forwarding their whole chat history shouldn't
+        # exhaust the daily Gemini/ElevenLabs/Tavily quota for everyone else.
+        prefs, under_limit = await asyncio.gather(
+            db_prefs.get(wa_user_hash), db_rate_limit.check_and_increment(wa_user_hash)
+        )
+        reply_lang = prefs["language"]
         if not under_limit:
             logger.info("Rate limit exceeded for wamid=%s", ref(msg.wamid))
             await send_text_reply(
                 to=msg.sender,
-                body="You've sent quite a few messages in the last hour -- please wait a bit before sending more.",
+                body=pick(RATE_LIMITED, reply_lang or guess_language(msg.text or msg.caption or "")),
                 reply_to_wamid=msg.wamid,
             )
             await db_submissions.mark_submission(msg.wamid, "rate_limited")
             return
 
-        # A read receipt is a courtesy -- if it fails, the user still deserves their answer.
-        try:
-            await mark_read(msg.wamid)
-        except Exception:
-            logger.warning("mark_read failed for wamid=%s, continuing", ref(msg.wamid), exc_info=True)
+        # The read receipt (blue ticks) goes out while the answer is being worked out, so it
+        # costs the user nothing; it is a courtesy and never blocks or fails the reply.
+        read_task = asyncio.create_task(_mark_read_quietly(msg))
 
-        result = await _compose_reply(msg)
+        result = await _compose_reply(msg, reply_lang)
         logger.info("Pipeline meta for %s: %s", ref(msg.wamid), result.meta)
         send_result = await send_text_reply(to=msg.sender, body=result.reply_text, reply_to_wamid=msg.wamid)
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        logger.info("Replied to %s in %d ms (input_kind=%s)", ref(msg.wamid), latency_ms, result.meta.get("input_kind"))
+        await read_task
 
         # Cache writes happen only after a successful send, so a DB hiccup here
         # never costs the user their answer.
@@ -154,9 +200,13 @@ async def handle_message(msg: InboundMessage) -> None:
             logger.exception("Failed to store reply_wamid for wamid=%s", ref(msg.wamid))
 
         try:
-            await db_submissions.mark_submission(msg.wamid, "done", cache_hit=result.cache_hit)
+            await db_submissions.mark_submission(msg.wamid, "done", cache_hit=result.cache_hit, latency_ms=latency_ms)
         except Exception:
             logger.exception("Failed to mark submission done for wamid=%s", ref(msg.wamid))
+
+        # First contact: after answering, offer the language choice once.
+        if prefs["language"] is None and not prefs["prompted"]:
+            await _offer_language_choice(msg, wa_user_hash)
 
     except Exception as exc:
         logger.exception("Pipeline failed for wamid=%s", ref(msg.wamid))
@@ -167,55 +217,73 @@ async def handle_message(msg: InboundMessage) -> None:
         try:
             await send_text_reply(
                 to=msg.sender,
-                body=_failure_reply(exc, msg),
+                body=_failure_reply(exc, msg, reply_lang),
                 reply_to_wamid=msg.wamid,
             )
         except Exception:
             logger.exception("Failed to send apology reply for wamid=%s", ref(msg.wamid))
 
 
-_GENERIC_FAILURE = "Sorry, something went wrong processing that message. Please try again."
+async def _offer_language_choice(msg: InboundMessage, wa_user_hash: str) -> None:
+    """Three tap-to-reply buttons, trilingual. Best-effort: the answer has already
+    been sent, so a failure here must never turn into an error for the user."""
+    try:
+        await send_reply_buttons(msg.sender, LANG_CHOOSER_BODY, LANG_BUTTONS)
+        await db_prefs.mark_prompted(wa_user_hash)
+    except Exception:
+        logger.warning("Could not offer the language choice for wamid=%s", ref(msg.wamid), exc_info=True)
 
 
-def _failure_reply(exc: Exception, msg: InboundMessage) -> str:
+async def _handle_language_request(msg: InboundMessage, wa_user_hash: str, action: str, current: str | None) -> None:
+    if action == language.MENU:
+        await send_reply_buttons(msg.sender, LANG_CHOOSER_BODY, LANG_BUTTONS)
+        await db_prefs.mark_prompted(wa_user_hash)
+    else:
+        saved = await db_prefs.set_language(wa_user_hash, action)
+        # If it could not be saved, say so rather than confirm a choice that will not stick.
+        body = pick(LANG_SET, action) if saved else pick(BUSY, current or action)
+        await send_text_reply(to=msg.sender, body=body, reply_to_wamid=msg.wamid)
+    await db_submissions.mark_submission(msg.wamid, "done")
+
+
+def _failure_reply(exc: Exception, msg: InboundMessage, reply_lang: str | None = None) -> str:
     """If the AI providers are what failed (quota, outage), say so and promise
-    nothing is wrong with the message; a real bug keeps the generic apology. The
-    text follows the user's language when it can be guessed from a caption."""
+    nothing is wrong with the message; a real bug gets a plain apology. Both follow
+    the user's chosen language, else the language of their own words."""
+    lang = reply_lang or guess_language((msg.text or msg.caption or "")[:300])
     if isinstance(exc, (GeminiError, FallbackError)):
-        return compose_busy((msg.text or msg.caption or "")[:300])
-    return _GENERIC_FAILURE
+        return compose_busy(lang=lang)
+    return pick(GENERIC_ERROR, lang)
 
 
-async def _compose_reply(msg: InboundMessage) -> PipelineResult:
+async def _compose_reply(msg: InboundMessage, reply_lang: str | None = None) -> PipelineResult:
     if msg.type == "text" and msg.text:
-        return await run_text_pipeline(msg.text, msg.frequently_forwarded)
+        return await run_text_pipeline(msg.text, msg.frequently_forwarded, reply_lang=reply_lang)
 
     if msg.type == "image":
-        return await _compose_image_reply(msg)
+        return await _compose_image_reply(msg, reply_lang)
 
     if msg.type in ("audio", "video"):
-        return await _compose_audio_or_video_reply(msg)
+        return await _compose_audio_or_video_reply(msg, reply_lang)
 
     # Stickers, locations, contacts, documents...
-    return PipelineResult(
-        f"{all_langs(NOT_A_CLAIM_FALLBACK)}\n\n{all_langs(CAPABILITY)}", meta={"input_kind": "unsupported_type"}
-    )
+    return PipelineResult(compose_unsupported(reply_lang), meta={"input_kind": "unsupported_type"})
 
 
-async def _compose_image_reply(msg: InboundMessage) -> PipelineResult:
+async def _compose_image_reply(msg: InboundMessage, reply_lang: str | None = None) -> PipelineResult:
     caption = (msg.caption or "").strip()
     if not msg.media_id:
-        return PipelineResult(compose_unreadable_media("image", caption), meta={"input_kind": "unreadable"})
+        return PipelineResult(compose_unreadable_media("image", caption, reply_lang), meta={"input_kind": "unreadable"})
 
     try:
         image_bytes = await download_media(msg.media_id)
     except Exception:
         logger.exception("Failed to download image for wamid=%s", ref(msg.wamid))
-        return PipelineResult(compose_busy(caption), meta={"input_kind": "download_failed"})
+        return PipelineResult(compose_busy(caption, reply_lang), meta={"input_kind": "download_failed"})
 
     if len(image_bytes) > MAX_IMAGE_BYTES:
         logger.info("Rejecting oversized image (%d bytes) for wamid=%s", len(image_bytes), ref(msg.wamid))
-        return PipelineResult(compose_unreadable_media("image", caption), meta={"input_kind": "too_large"})
+        return PipelineResult(compose_unreadable_media("image", caption, reply_lang), meta={"input_kind": "too_large"})
 
     mime_type = msg.media_mime_type or "image/jpeg"
     try:
@@ -225,35 +293,41 @@ async def _compose_image_reply(msg: InboundMessage) -> PipelineResult:
         # check that rather than fail outright.
         logger.exception("Image reading failed for wamid=%s", ref(msg.wamid))
         if caption:
-            return await run_text_pipeline(
-                f"[Caption sent with the image]\n{caption}", msg.frequently_forwarded
+            result = await run_text_pipeline(
+                f"[Caption sent with the image]\n{caption}", msg.frequently_forwarded, reply_lang=reply_lang
             )
-        return PipelineResult(compose_busy(), meta={"input_kind": "vision_unavailable"})
+            if result.meta.get("input_kind") == "unclear":
+                # The claim was probably in the picture we could not read; "I can't find a
+                # claim" would blame the user for our outage.
+                return PipelineResult(compose_busy(caption, reply_lang), meta={"input_kind": "vision_unavailable"})
+            return result
+        return PipelineResult(compose_busy(lang=reply_lang), meta={"input_kind": "vision_unavailable"})
 
     if reading.text is None:
-        # A photo with nothing written on it and no caption: say what we can
-        # see, and be honest that we can't judge a photo itself.
-        if reading.description:
-            return PipelineResult(compose_photo_only(reading.description), meta={"input_kind": "photo_only"})
-        return PipelineResult(compose_unreadable_media("image"), meta={"input_kind": "unreadable"})
+        # Nothing written and no caption. A blurry, dark or blank picture gets a
+        # request for a clearer one; a real photo gets what we can see, plus the
+        # honest limit that we cannot judge a photo itself.
+        if reading.kind == "unreadable" or not reading.description:
+            return PipelineResult(compose_unreadable_media("image", lang=reply_lang), meta={"input_kind": "unreadable"})
+        return PipelineResult(compose_photo_only(reading.description, reply_lang), meta={"input_kind": "photo_only"})
 
-    return await run_text_pipeline(reading.text, msg.frequently_forwarded)
+    return await run_text_pipeline(reading.text, msg.frequently_forwarded, reply_lang=reply_lang)
 
 
-async def _compose_audio_or_video_reply(msg: InboundMessage) -> PipelineResult:
+async def _compose_audio_or_video_reply(msg: InboundMessage, reply_lang: str | None = None) -> PipelineResult:
     caption = (msg.caption or "").strip()
     if not msg.media_id:
-        return PipelineResult(compose_unreadable_media(msg.type, caption), meta={"input_kind": "unreadable"})
+        return PipelineResult(compose_unreadable_media(msg.type, caption, reply_lang), meta={"input_kind": "unreadable"})
 
     try:
         media_bytes = await download_media(msg.media_id)
     except Exception:
         logger.exception("Failed to download %s for wamid=%s", msg.type, ref(msg.wamid))
-        return PipelineResult(compose_busy(caption), meta={"input_kind": "download_failed"})
+        return PipelineResult(compose_busy(caption, reply_lang), meta={"input_kind": "download_failed"})
 
     if len(media_bytes) > MAX_AV_BYTES:
         logger.info("Rejecting oversized %s (%d bytes) for wamid=%s", msg.type, len(media_bytes), ref(msg.wamid))
-        return PipelineResult(compose_too_long(msg.type, caption), meta={"input_kind": "too_large"})
+        return PipelineResult(compose_too_long(msg.type, caption, reply_lang), meta={"input_kind": "too_large"})
 
     try:
         if msg.type == "video":
@@ -265,21 +339,25 @@ async def _compose_audio_or_video_reply(msg: InboundMessage) -> PipelineResult:
         transcript = await normalize_audio(audio_bytes, audio_mime_type)
     except AudioTooLongError as exc:
         logger.info("Rejecting %s from wamid=%s: %.0fs exceeds cap", msg.type, ref(msg.wamid), exc.duration_seconds)
-        return PipelineResult(compose_too_long(msg.type, caption), meta={"input_kind": "too_long"})
+        return PipelineResult(compose_too_long(msg.type, caption, reply_lang), meta={"input_kind": "too_long"})
     except MediaUnreadableError:
         logger.warning("Could not decode %s for wamid=%s", msg.type, ref(msg.wamid), exc_info=True)
-        return PipelineResult(compose_unreadable_media(msg.type, caption), meta={"input_kind": "unreadable"})
+        return PipelineResult(compose_unreadable_media(msg.type, caption, reply_lang), meta={"input_kind": "unreadable"})
 
     if transcript is None:
-        return PipelineResult(compose_busy(caption), meta={"input_kind": "transcription_failed"})
+        return PipelineResult(compose_busy(caption, reply_lang), meta={"input_kind": "transcription_failed"})
 
     if not transcript:
         # No speech. A caption may still carry the claim.
         if caption:
-            return await run_text_pipeline(f"[Caption sent with the {msg.type}]\n{caption}", msg.frequently_forwarded)
-        return PipelineResult(compose_unreadable_media(msg.type), meta={"input_kind": "no_speech"})
+            return await run_text_pipeline(
+                f"[Caption sent with the {msg.type}]\n{caption}", msg.frequently_forwarded, reply_lang=reply_lang
+            )
+        return PipelineResult(compose_unreadable_media(msg.type, lang=reply_lang), meta={"input_kind": "no_speech"})
 
-    return await run_text_pipeline(label_transcript(transcript, msg.type, msg.caption), msg.frequently_forwarded)
+    return await run_text_pipeline(
+        label_transcript(transcript, msg.type, msg.caption), msg.frequently_forwarded, reply_lang=reply_lang
+    )
 
 
 async def _handle_reaction(msg: InboundMessage) -> None:

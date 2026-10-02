@@ -7,3 +7,8 @@ venv/
 tests/scenarios/assets/
 tests/scenarios/*.log
 tests/scenarios/last_run.md
+deploy/app.env
+app.env
+tests/scenarios/*.done
+logs/
+.claude/

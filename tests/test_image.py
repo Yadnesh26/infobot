@@ -59,3 +59,40 @@ async def test_normalize_image_strips_links_from_the_description(monkeypatch):
     )
     r = await normalize_image(b"fake-bytes", "image/jpeg", None)
     assert "evil.example" not in r.description
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "description",
+    [
+        "A heavily blurred image with no discernible text or objects.",
+        "The image is a solid, featureless grey square with no visible content or details.",
+        "An out of focus photo",
+        "A blank white page",
+    ],
+)
+async def test_a_blurred_or_blank_picture_is_unreadable_even_if_the_model_calls_it_a_photo(monkeypatch, description):
+    """Regression (claim7): the model labelled a blurred poster 'photo', so the user was told
+    the bot cannot judge whether photos are genuine instead of being asked for a clearer one."""
+    _stub_vision(monkeypatch, {"has_readable_text": False, "extracted_text": "", "description": description, "content_kind": "photo"})
+    r = await normalize_image(b"x", "image/jpeg", None)
+    assert r.kind == "unreadable"
+
+
+@pytest.mark.anyio
+async def test_a_real_photo_stays_a_photo(monkeypatch):
+    _stub_vision(monkeypatch, {"has_readable_text": False, "extracted_text": "", "description": "A street flooded with water, cars half submerged", "content_kind": "photo"})
+    assert (await normalize_image(b"x", "image/jpeg", None)).kind == "photo"
+
+
+@pytest.mark.anyio
+async def test_text_in_a_soft_image_is_never_discarded_for_looking_blurry(monkeypatch):
+    _stub_vision(monkeypatch, {"has_readable_text": True, "extracted_text": "Petrol Rs 200", "description": "A slightly blurred screenshot", "content_kind": "text_graphic"})
+    r = await normalize_image(b"x", "image/jpeg", None)
+    assert r.kind == "text_graphic" and "Petrol Rs 200" in r.text
+
+
+@pytest.mark.anyio
+async def test_the_content_kind_reaches_the_reading_and_bad_values_fall_back_to_photo(monkeypatch):
+    _stub_vision(monkeypatch, {"has_readable_text": False, "extracted_text": "", "description": "A dog", "content_kind": "nonsense"})
+    assert (await normalize_image(b"x", "image/jpeg", None)).kind == "photo"

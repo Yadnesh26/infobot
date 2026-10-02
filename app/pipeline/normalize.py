@@ -21,12 +21,21 @@ _SCHEMA_IMAGE = {
         "has_readable_text": {"type": "boolean"},
         "extracted_text": {"type": "string"},
         "description": {"type": "string"},
+        "content_kind": {"type": "string", "enum": ["text_graphic", "photo", "unreadable"]},
     },
     "required": ["has_readable_text", "extracted_text"],
 }
 
 _FFPROBE_TIMEOUT = 20
 _FFMPEG_TIMEOUT = 90
+
+
+_NOTHING_TO_SEE = re.compile(
+    r"blur|out of focus|indistinct|featureless|illegible|unrecogni[sz]able|too dark|"
+    r"no (?:visible|discernible|readable|clear)|nothing (?:visible|discernible|clear)|"
+    r"(?:solid|plain|blank) (?:grey|gray|black|white|colou?r)|^blank",
+    re.I,
+)
 
 
 def normalize_text(text: str) -> str:
@@ -46,6 +55,7 @@ class ImageReading:
     description: str = ""
     has_image_text: bool = False
     has_caption: bool = False
+    kind: str = "photo"  # text_graphic | photo | unreadable
 
 
 async def normalize_image(image_bytes: bytes, mime_type: str, caption: str | None) -> ImageReading:
@@ -72,11 +82,18 @@ async def normalize_image(image_bytes: bytes, mime_type: str, caption: str | Non
     if parts and description:
         parts.append(f"[What the image shows]\n{description}")
 
+    kind = data.get("content_kind") if data.get("content_kind") in ("text_graphic", "photo", "unreadable") else "photo"
+    if not extracted and _NOTHING_TO_SEE.search(description):
+        # The model often calls a blurred or blank picture a "photo" while describing it as
+        # blurred or featureless. Trust the description: there is nothing to judge or read.
+        kind = "unreadable"
+
     return ImageReading(
         text="\n\n".join(parts) or None,
         description=description,
         has_image_text=bool(extracted),
         has_caption=bool(caption),
+        kind=kind,
     )
 
 

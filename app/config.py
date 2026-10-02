@@ -13,11 +13,13 @@ class Settings(BaseSettings):
     GEMINI_API_KEY: str = ""
     GEMINI_API_KEY_FALLBACK: str = ""  # a key from a separate Google account/project: its own quota
     GEMINI_MODEL: str = ""
+    GEMINI_MODEL_FALLBACK: str = ""  # tried when GEMINI_MODEL is slow, overloaded or out of quota, before Groq
     GEMINI_EMBED_MODEL: str = ""
 
     ELEVENLABS_API_KEY: str = ""
 
     TAVILY_API_KEY: str = ""
+    TAVILY_SEARCH_DEPTH: str = "fast"  # basic | fast | ultra-fast. fast is ~2x quicker and found better sources in a 4-claim A/B (2026-10-01)
 
     GROQ_API_KEY: str = ""
     GROQ_MODEL: str = "openai/gpt-oss-120b"

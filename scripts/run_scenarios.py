@@ -36,7 +36,7 @@ _LEAK = re.compile(r"untrusted_message|input_kind|system prompt|GEMINI_API_KEY|P
 _URL = re.compile(r"https?://\S+")
 _PHONE = re.compile(r"\+?\d[\d\s\-]{9,}\d")
 _DEVA = re.compile(r"[ऀ-ॿ]")
-_SOURCES_HEAD = re.compile(r"\n(?:Sources|स्रोत):")
+_SOURCES_BLOCK = re.compile(r"^\*(?:Sources|स्रोत)\*\n")
 
 FALLBACKS = None  # filled in main()
 
@@ -70,10 +70,9 @@ def check(sc: Scenario, reply: str, meta: dict, writes: list[dict]) -> list[str]
         problems.append("reply contains something that looks like a credential")
     if _LEAK.search(reply):
         problems.append("reply leaks internal wording")
-    # Everything before the Sources list is our own or the model's prose; links and
-    # long numbers are only legitimate inside the list built from retrieved results.
-    parts = _SOURCES_HEAD.split(reply, maxsplit=1)
-    prose = parts[0]
+    # Links and long numbers are only legitimate inside a *Sources* list built from
+    # retrieved results, so judge everything else. Blocks are separated by blank lines.
+    prose = "\n\n".join(b for b in reply.split("\n\n") if not _SOURCES_BLOCK.match(b))
     stray = _URL.findall(prose)
     if stray:
         problems.append(f"link outside a Sources list: {stray[0][:60]}")
@@ -105,7 +104,7 @@ def check(sc: Scenario, reply: str, meta: dict, writes: list[dict]) -> list[str]
     # The reply must be in the language the claim was written in. Cached answers
     # are stored in English only, so they are exempt; several claims may mix
     # languages on purpose, so only single-claim replies are judged.
-    lang = (meta.get("language") or "").lower()
+    lang = (meta.get("reply_lang") or meta.get("language") or "").lower()
     if kind == "claims" and n == 1 and not any(meta.get("cached") or []) and meta.get("verdicts") not in (["refused"],):
         share = devanagari_share(prose)
         if lang.startswith("en") and share > 0.15:
@@ -135,7 +134,7 @@ async def run_one(sc: Scenario, sem: asyncio.Semaphore) -> dict:
             msg = build_message(sc, files)
             # download_media is looked up by name in app.main at call time
             main.download_media = fake_download
-            result = await main._compose_reply(msg)
+            result = await main._compose_reply(msg, sc.reply_lang)
             reply, meta, writes = result.reply_text, result.meta, result.pending_claim_writes
             error = None
         except Exception as exc:  # the real handler would apologise; record it as a failure

@@ -4,6 +4,7 @@ from pathlib import Path
 
 from app.config import settings
 from app.pipeline.guard import sanitize_output, wrap_untrusted
+from app.pipeline.messages import LANGUAGE_NAMES
 from app.providers.gemini import generate_json
 
 _PROMPT = (Path(__file__).parent.parent / "prompts" / "extract_classify.txt").read_text(encoding="utf-8")
@@ -145,8 +146,17 @@ def _parse_claims(raw_claims: list, detected_language: str, frequently_forwarded
     return claims
 
 
-async def extract_and_classify(raw_text: str, frequently_forwarded: bool) -> ClassifyResult:
-    prompt = f"{_PROMPT}\n\n{wrap_untrusted(raw_text)}"
+async def extract_and_classify(
+    raw_text: str, frequently_forwarded: bool, reply_language: str | None = None
+) -> ClassifyResult:
+    language_rule = ""
+    if reply_language in LANGUAGE_NAMES:
+        # The user chose a reply language; friendly_reply must use it whatever the message was in.
+        language_rule = (
+            f"REPLY LANGUAGE: write friendly_reply in {LANGUAGE_NAMES[reply_language]} "
+            "(in its own script), whatever language the message is in.\n\n"
+        )
+    prompt = f"{_PROMPT}\n\n{language_rule}{wrap_untrusted(raw_text)}"
     data = await generate_json(prompt, _SCHEMA)
 
     detected = (data.get("detected_language") or "en").strip()
@@ -172,6 +182,7 @@ async def extract_and_classify(raw_text: str, frequently_forwarded: bool) -> Cla
         input_kind=kind,
         claims=claims,
         context_summary=sanitize_output(data.get("context_summary") or "", 200),
-        friendly_reply=sanitize_output(data.get("friendly_reply") or "", 420),
+        # A model that copies the prompt's example may emit a literal backslash-n.
+        friendly_reply=sanitize_output((data.get("friendly_reply") or "").replace("\\n", "\n"), 700),
         more_claims_omitted=omitted,
     )

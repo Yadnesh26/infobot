@@ -2,6 +2,62 @@
 
 Newest first. Only meaningful changes; no transcripts.
 
+## 2026-10-01 (later still): AWS EC2 deployment with Docker and GitHub Actions (UNCOMMITTED, NOT YET DEPLOYED)
+
+### Completed
+- `Dockerfile` (python 3.12-slim + ffmpeg, non-root, health check, graceful 40 s stop), `.dockerignore`, `requirements.lock` (24 packages, generated inside a Linux Python 3.12 container).
+- `deploy/`: `docker-compose.yml` (bot + Caddy, bot port not published, read-only root, no capabilities), `Caddyfile` (auto-HTTPS, only `/webhook` `/health` `/trending` reachable, 1 MB body cap), `remote-deploy.sh` (runs on the instance: ECR login, pull, up, wait healthy, **automatic rollback**), `aws/infobot-stack.yaml` (CloudFormation: EC2 AL2023 with no SSH, Elastic IP, ECR repo, instance role, GitHub OIDC role), `README.md` (runbook), `scripts/make_app_env.py` (builds the server's secrets file from only the settings the app reads).
+- `.github/workflows/ci.yml` (tests + image build on every push/PR) and `deploy.yml` (on push to `main`: tests, build, push to ECR, deploy over AWS SSM). GitHub holds only four non-secret *variables*; AWS access is a short-lived OIDC token limited to the `production` environment.
+
+### Files Changed
+- New: `Dockerfile`, `.dockerignore`, `requirements.lock`, `deploy/*`, `.github/workflows/*`, `scripts/make_app_env.py`
+- Edited: `.gitignore`
+
+### Current State
+- Verified locally: image builds (864 MB) with no `.env` inside; runs as non-root, read-only filesystem, cap-drop ALL; passes its health check; webhook handshake and signature rejection behave; bot's own ffmpeg code runs inside it; all 305 unit tests pass inside the image's Linux Python 3.12 with the lock; Caddy stack tested with its local certificate (only public paths reachable, `/docs` 404, 2 MB body 413, HTTP redirects to HTTPS, app port not published); rollback script tested against stand-in docker/aws commands (healthy, unhealthy with previous image, unhealthy first deploy, missing `app.env`); `actionlint`, `shellcheck`, `cfn-lint` clean. Testing found and fixed two real bugs: a colon in a compose `${VAR:?msg}` message broke the YAML, and a comma in a CloudFormation description broke the template.
+- **Nothing has touched AWS or GitHub yet**: no AWS/GitHub CLI or remote exists on this machine. The stack, the OIDC role, SSM delivery, Caddy's real certificate and the GitHub variables are unverified until the runbook is followed.
+
+### Remaining Work
+- Commit, create the GitHub repo, `git branch -M main`, push (waiting on the user). Then follow `deploy/README.md` steps 2-6.
+- After the first successful deploy: switch Meta's webhook to the new URL (could be done with the Meta MCP tools), stop the local server and ngrok.
+
+### Important Notes
+- The server's `app.env` must contain only what `app.config.Settings` reads. `scripts/make_app_env.py` enforces that; the local `.env` also holds `SUPABASE_DB_PASSWORD`, `SUPABASE_SECRET_KEY`, `SUPABASE_PUBLISHABLE_KEY`, `WA_BUSINESS_ACCOUNT_ID`, which must not go to the server.
+- `PHONE_HASH_SALT` must stay the same across environments or stored hashes stop matching.
+- `architecture-workflow.md` section 9 (infrastructure) and the "no Dockerfile or CI" lines are now out of date; that file was produced by another session and was not edited here.
+
+## 2026-10-01 (later): Reply redesign: language preference, scannable formatting, mixed messages (UNCOMMITTED)
+
+### Completed
+- **Per-user reply language.** After a first-time user's first answer, the bot sends three tap buttons (English / हिन्दी / मराठी). Typing `language` / `भाषा` / `bhasha` (exact match only) reopens them; typing a language name sets it directly. Stored in new Supabase table `user_prefs` (hashed number, language, prompted flag; RLS on; SQL in `db/migrations/001_user_prefs.sql`). The chosen language drives the classifier's `friendly_reply`, every explanation, all labels and all static messages. With no choice, each answer follows its claim's language (old behaviour). Unknown language on media with no text is now English only (was all three stacked).
+- **Cached answers are translated** for non-English readers (one small Gemini call, 20 s cap, falls back to English text with English labels, never a mixed reply). Fixes the old "cache hits are English only" limitation.
+- **WhatsApp-formatted replies.** Verdict first (`❌ *FALSE*`, confidence dot, quoted claim, `*Why:*`, `*Sources*`, footer). Several claims open with an at-a-glance summary (`*3 claims checked*` + one line each), then divider-separated blocks. Source lists shrink before any claim is cut. Formatting characters in user/model text are stripped so they cannot break the layout.
+- **Mixed messages.** Hearsay about private or local things ("my grandmother says...") is `personal_or_private`, not a claim. A message that is only chit-chat/requests/opinions gets one bulleted line per part. A message with claims plus chit-chat gets the verdicts plus a `💬 About the rest of your message` note (before, the note was silently dropped).
+- **Blurred/blank images** (and images the vision model calls a "photo" while describing them as featureless) now get "send a clearer picture" instead of the can't-judge-authenticity text. If vision fails and only a bare caption is left, the user is told we could not read the image instead of "unclear".
+- Image calls get a 60 s timeout (was 30 s), errors log with `repr` (timeouts used to log blank). Localised the rate-limit and generic-error messages.
+- Privacy page now lists Groq, the Gemini free-tier data-use note and the language choice; data-deletion page lists the language choice (site files edited, **not yet redeployed**).
+- Tests: 305 offline (was 220); harness now 102 scenarios (new groups J mixed-message, L reply-language); `tests/conftest.py` gives every test an offline `offline_prefs` fixture.
+
+### Files Changed
+- New: `app/db/prefs.py`, `app/pipeline/language.py`, `db/migrations/001_user_prefs.sql`, `tests/test_language.py`
+- Rewritten: `app/pipeline/compose.py`, `app/main.py` (handler + media handlers)
+- Edited: `app/pipeline/{messages,classify,orchestrator,verify,normalize}.py`, `app/prompts/{extract_classify,extract_image_text,verify_t1,verify_t2,verify_t3a}.txt`, `app/providers/gemini.py`, `app/whatsapp/{parser,client}.py`, `scripts/{scenarios,run_scenarios}.py`, `site/{privacy,data-deletion}.html`, `tests/*`
+
+### Current State
+- 305 offline tests pass; live tier fixtures 15/15 after the prompt changes; live: 15 of 17 targeted scenarios on the first pass, the 2 misses were fixed and re-verified (blurred image, vision timeout) or were Gemini timeouts (translation correctly fell back to English; passes alone).
+- Server restarted on this code (no `--reload`).
+- **Not verified on real WhatsApp:** the interactive buttons (payload shape follows Meta's documented format and is unit-tested, but has never reached a phone) and the first-contact flow. Test with a number that has no `user_prefs` row, or delete its row first.
+
+### Remaining Work
+- Commit (waiting on the user). Redeploy the Netlify site for the two page edits (how it is deployed: TODO - Needs confirmation).
+- Full live scenario run (102) once quota allows.
+- Watch Gemini latency: image scenarios took 86 s and 139 s and the log showed `ReadTimeout` on 30 s text calls while two scenarios ran at once.
+
+### Important Notes
+- `friendly_reply` in the classifier schema is now required and is also used as the side note for claim messages. A reply containing a newline is treated as multi-part and is sent without the fixed capability line.
+- `ClaimOutcome.local_lang` records the language the explanation really is in; labels follow it, so untranslated English text always gets English labels.
+- Tests that touch `app.main` get prefs/buttons stubbed by the autouse `offline_prefs` fixture; the real `app.db.prefs` functions are stubbed too, so data-layer tests must capture them at import time (see `tests/test_language.py`).
+
 ## 2026-10-01: Multi-claim redesign, injection guard, low-rejection replies, provider resilience (UNCOMMITTED)
 
 ### Completed
