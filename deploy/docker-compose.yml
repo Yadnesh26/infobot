@@ -1,0 +1,55 @@
+# Runs on the EC2 instance in /opt/infobot. Delivered by the GitHub Actions deploy job.
+#
+#   .env      written by the instance bootstrap: IMAGE (set by each deploy) and SITE_ADDRESS
+#   app.env   the bot's secrets (same variables as .env.example). Created once by hand, never in git.
+name: infobot
+
+services:
+  app:
+    image: "${IMAGE:?IMAGE is empty, so the first deploy has not run yet}"
+    container_name: infobot-app
+    restart: unless-stopped
+    env_file: app.env
+    expose:
+      - "8000"
+    stop_grace_period: 45s
+    # The bot only writes temporary media files, and only under /tmp.
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: infobot-caddy
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      SITE_ADDRESS: "${SITE_ADDRESS:?SITE_ADDRESS is empty}"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  # Holds the TLS certificates. Losing it only means re-issuing them.
+  caddy_data:
+  caddy_config:

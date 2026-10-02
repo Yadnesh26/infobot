@@ -1,0 +1,233 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  InfoBot on one EC2 instance. Creates the server (Amazon Linux 2023, Docker, no SSH port;
+  managed through Session Manager), a fixed public IP, a private ECR image registry, and an IAM
+  role that lets the GitHub Actions "production" environment of one repository push an image and
+  run the deploy script. No access keys are stored in GitHub.
+
+Parameters:
+  GitHubRepo:
+    Type: String
+    Description: The GitHub repository that may deploy, as owner/name (for example yadnesh26/infobot).
+    AllowedPattern: "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+    ConstraintDescription: must look like owner/name
+  InstanceType:
+    Type: String
+    Default: t3.small
+    AllowedValues: [t3.micro, t3.small, t3.medium]
+    Description: t3.small (2 GB) is comfortable. t3.micro (1 GB) works because of the swap file, but ffmpeg on long videos will be slow.
+  DomainName:
+    Type: String
+    Default: ""
+    Description: >-
+      A domain you own whose DNS you will point at the instance's IP (for example bot.example.com).
+      Leave empty to use a free <ip>.sslip.io name instead.
+  CreateGitHubOidcProvider:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: An AWS account can have only one GitHub OIDC provider. Use "false" if yours already has one.
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+
+Conditions:
+  HasDomain: !Not [!Equals [!Ref DomainName, ""]]
+  MakeOidcProvider: !Equals [!Ref CreateGitHubOidcProvider, "true"]
+
+Resources:
+  EcrRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: infobot
+      EmptyOnDelete: true
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {"rules":[{"rulePriority":1,"description":"Keep the last 10 images","selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":10},"action":{"type":"expire"}}]}
+
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: {Service: ec2.amazonaws.com}
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: pull-infobot-image
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - ecr:BatchGetImage
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchCheckLayerAvailability
+                Resource: !GetAtt EcrRepository.Arn
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref InstanceRole]
+
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: InfoBot web traffic only. No SSH; use Session Manager.
+      SecurityGroupIngress:
+        - {IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: 0.0.0.0/0, Description: "HTTP: redirects to HTTPS and answers the certificate challenge"}
+        - {IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0, Description: HTTPS}
+        - {IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIpv6: "::/0", Description: HTTP}
+        - {IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIpv6: "::/0", Description: HTTPS}
+
+  ElasticIp:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+
+  Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref InstanceProfile
+      SecurityGroupIds: [!GetAtt SecurityGroup.GroupId]
+      MetadataOptions:
+        HttpTokens: required
+        HttpPutResponseHopLimit: 1
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 20
+            VolumeType: gp3
+            Encrypted: true
+            DeleteOnTermination: true
+      Tags:
+        - {Key: Name, Value: infobot}
+      UserData:
+        Fn::Base64: !Sub
+          - |
+            #!/bin/bash
+            set -euxo pipefail
+            dnf install -y docker
+            systemctl enable --now docker
+            install -d /usr/local/lib/docker/cli-plugins
+            curl -fsSL https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64 \
+              -o /usr/local/lib/docker/cli-plugins/docker-compose
+            chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+            # 2 GB of swap so a short memory spike while ffmpeg runs cannot kill the bot on a small instance.
+            fallocate -l 2G /swapfile
+            chmod 600 /swapfile
+            mkswap /swapfile
+            swapon /swapfile
+            echo '/swapfile none swap sw 0 0' >> /etc/fstab
+            install -d -m 750 /opt/infobot
+            umask 077
+            cat > /opt/infobot/.env <<ENVEOF
+            SITE_ADDRESS=${SiteAddress}
+            IMAGE=
+            ENVEOF
+          - SiteAddress: !If
+              - HasDomain
+              - !Ref DomainName
+              - !Sub
+                - "${Dashed}.sslip.io"
+                - Dashed: !Join ["-", !Split [".", !Ref ElasticIp]]
+
+  ElasticIpAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      InstanceId: !Ref Instance
+      AllocationId: !GetAtt ElasticIp.AllocationId
+
+  GitHubOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: MakeOidcProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList: [sts.amazonaws.com]
+      ThumbprintList: [6938fd4d98bab03faadb97b34396831e3780aea1]
+
+  GitHubDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: infobot-github-deploy
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                # Only the workflow job that declares `environment: production` in this repository.
+                token.actions.githubusercontent.com:sub: !Sub repo:${GitHubRepo}:environment:production
+      Policies:
+        - PolicyName: push-image-and-deploy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: EcrLogin
+                Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: "*"
+              - Sid: EcrPush
+                Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:InitiateLayerUpload
+                  - ecr:UploadLayerPart
+                  - ecr:CompleteLayerUpload
+                  - ecr:PutImage
+                  - ecr:BatchGetImage
+                  - ecr:GetDownloadUrlForLayer
+                Resource: !GetAtt EcrRepository.Arn
+              - Sid: RunDeployScriptOnTheInstance
+                Effect: Allow
+                Action: ssm:SendCommand
+                Resource:
+                  - !Sub arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/${Instance}
+                  - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}::document/AWS-RunShellScript
+              - Sid: ReadCommandResult
+                Effect: Allow
+                Action:
+                  - ssm:GetCommandInvocation
+                  - ssm:ListCommandInvocations
+                Resource: "*"
+
+Outputs:
+  WebhookUrl:
+    Description: Paste this as the Callback URL in the Meta app's WhatsApp webhook settings.
+    Value: !Sub
+      - "https://${Host}/webhook"
+      - Host: !If
+          - HasDomain
+          - !Ref DomainName
+          - !Sub
+            - "${Dashed}.sslip.io"
+            - Dashed: !Join ["-", !Split [".", !Ref ElasticIp]]
+  PublicIp:
+    Description: Point your domain's A record here (only needed when you set DomainName).
+    Value: !Ref ElasticIp
+  InstanceId:
+    Description: GitHub variable INSTANCE_ID, and the target for Session Manager.
+    Value: !Ref Instance
+  EcrRepositoryName:
+    Description: GitHub variable ECR_REPOSITORY.
+    Value: !Ref EcrRepository
+  GitHubRoleArn:
+    Description: GitHub variable AWS_ROLE_ARN.
+    Value: !GetAtt GitHubDeployRole.Arn
+  Region:
+    Description: GitHub variable AWS_REGION.
+    Value: !Ref AWS::Region

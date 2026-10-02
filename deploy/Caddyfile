@@ -1,0 +1,20 @@
+# HTTPS in front of the bot. Meta only delivers webhooks to a public https:// address with a
+# trusted certificate; Caddy obtains and renews one automatically for SITE_ADDRESS
+# (a domain you own, or <ip-with-dashes>.sslip.io when you have no domain).
+{$SITE_ADDRESS} {
+	encode zstd gzip
+
+	# Only what Meta and monitoring need. FastAPI's /docs and /openapi.json stay private.
+	@public path /webhook /health /trending
+	handle @public {
+		# Webhook payloads are small JSON; media is fetched separately from Meta.
+		request_body {
+			max_size 1MB
+		}
+		reverse_proxy app:8000
+	}
+
+	handle {
+		respond "Not found" 404
+	}
+}

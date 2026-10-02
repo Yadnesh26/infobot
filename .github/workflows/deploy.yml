@@ -1,0 +1,110 @@
+name: deploy
+
+# Every push to main: run the tests, build the image, push it to ECR, and have the
+# EC2 instance pull and start it (with automatic rollback, see deploy/remote-deploy.sh).
+# Nothing secret lives in GitHub: the job signs in to AWS with a short-lived OIDC token,
+# and the bot's own secrets stay on the server in /opt/infobot/app.env.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    uses: ./.github/workflows/ci.yml
+
+  deploy:
+    needs: test
+    # Skipped until the AWS role variable exists (deploy/README.md step 4), so pushing to a
+    # repository that is not wired to AWS yet does not produce a failing run.
+    if: ${{ vars.AWS_ROLE_ARN != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # The AWS role only trusts this environment name (see deploy/aws/infobot-stack.yaml).
+    # To require a click before each deploy, add "required reviewers" to it in GitHub.
+    environment: production
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      INSTANCE_ID: ${{ vars.INSTANCE_ID }}
+      ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build and push the image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+            ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Deploy to the instance
+        env:
+          IMAGE: ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          # One script for the instance: write the three deploy files, then run the deploy.
+          {
+            echo 'set -euo pipefail'
+            echo 'install -d -m 755 /opt/infobot'
+            for f in docker-compose.yml Caddyfile remote-deploy.sh; do
+              echo "echo '$(base64 -w0 "deploy/$f")' | base64 -d > /opt/infobot/$f"
+            done
+            echo 'chmod +x /opt/infobot/remote-deploy.sh'
+            echo "/opt/infobot/remote-deploy.sh '$IMAGE'"
+          } > payload.sh
+          jq -n --rawfile script payload.sh '{commands: [$script]}' > params.json
+
+          command_id=$(aws ssm send-command \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name AWS-RunShellScript \
+            --comment "deploy ${GITHUB_SHA::7}" \
+            --timeout-seconds 900 \
+            --parameters file://params.json \
+            --query Command.CommandId --output text)
+          echo "SSM command: $command_id"
+
+          status=Pending
+          for _ in $(seq 1 180); do
+            sleep 5
+            status=$(aws ssm get-command-invocation --command-id "$command_id" --instance-id "$INSTANCE_ID" \
+              --query Status --output text 2>/dev/null || echo Pending)
+            case "$status" in Success|Failed|Cancelled|TimedOut) break ;; esac
+          done
+
+          echo "===== deploy output ====="
+          aws ssm get-command-invocation --command-id "$command_id" --instance-id "$INSTANCE_ID" \
+            --query StandardOutputContent --output text || true
+          echo "===== deploy errors ====="
+          aws ssm get-command-invocation --command-id "$command_id" --instance-id "$INSTANCE_ID" \
+            --query StandardErrorContent --output text || true
+
+          if [ "$status" != "Success" ]; then
+            echo "::error::Deploy finished with status: $status (the previous version was restored if it had been running)"
+            exit 1
+          fi
