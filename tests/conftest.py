@@ -70,3 +70,31 @@ def fresh_http_pools():
     http.reset()
     yield
     http.reset()
+
+
+@pytest.fixture(autouse=True)
+def no_real_network(monkeypatch):
+    """Unit tests never reach the real internet. A test that forgets to stub a service fails
+    loudly here, the same on a developer's machine (which has a real .env) and in CI (which has
+    none). Tests that need a fake client install their own over this one."""
+
+    class _Blocked:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def _refuse(self, method, url):
+            raise AssertionError(f"a unit test made a real network call: {method} {url}")
+
+        async def get(self, url, *args, **kwargs):
+            await self._refuse("GET", url)
+
+        async def post(self, url, *args, **kwargs):
+            await self._refuse("POST", url)
+
+        async def patch(self, url, *args, **kwargs):
+            await self._refuse("PATCH", url)
+
+        async def aclose(self):
+            pass
+
+    monkeypatch.setattr("httpx.AsyncClient", _Blocked)

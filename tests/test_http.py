@@ -3,6 +3,9 @@ import pytest
 
 from app import http
 
+# The real class, captured at import time, before the autouse fixture replaces it for each test.
+REAL_CLIENT = httpx.AsyncClient
+
 
 def test_one_client_is_reused_per_service_and_services_do_not_share():
     a = http.client("gemini")
@@ -17,7 +20,8 @@ def test_reset_forgets_pools_so_a_test_never_inherits_a_connection():
 
 
 @pytest.mark.anyio
-async def test_close_all_closes_every_pool_and_the_next_call_gets_a_fresh_one():
+async def test_close_all_closes_every_pool_and_the_next_call_gets_a_fresh_one(monkeypatch):
+    monkeypatch.setattr("httpx.AsyncClient", REAL_CLIENT)  # this test is about real clients
     first = http.client("gemini")
     await http.close_all()
     assert first.is_closed
