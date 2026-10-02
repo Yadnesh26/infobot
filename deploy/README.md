@@ -118,7 +118,8 @@ Meta developer dashboard -> your app -> WhatsApp -> Configuration -> Webhook:
 - Verify and save, and make sure the `messages` field is subscribed.
 
 Now stop the local `uvicorn` and `ngrok` (Meta only delivers to one URL, but nothing else should
-compete for the same Gemini quota). Send `claims_test/claim8` from your phone to confirm.
+compete for the same Gemini quota). Send the bot a claim from your phone to confirm, for example
+"Humans use only 10 percent of their brain."
 
 ## Day to day
 
@@ -135,7 +136,7 @@ compete for the same Gemini quota). Send `claims_test/claim8` from your phone to
 A deploy replaces the running container: replies already being written finish first (the bot gets up
 to 45 s to wind down), and messages that arrive during the few seconds of swap are retried by Meta and
 de-duplicated by message id. A hard crash or power loss can still drop a reply in flight (there is no
-job queue yet; see `docs/TASKS.md`).
+job queue yet).
 
 ## Cost (approximate, check the AWS pricing calculator for your region)
 
@@ -147,8 +148,9 @@ job queue yet; see `docs/TASKS.md`).
 | **Total** | **roughly $20-25 a month** for t3.small |
 
 Whether the free tier or starter credits cover this depends on when the AWS account was created; look
-at **Billing -> Free tier**. The model APIs (Gemini, Tavily, ...) are billed separately; see the cost
-notes in `docs/PROGRESS.md`.
+at **Billing -> Free tier**. The model APIs (Gemini, Tavily, ...) are billed separately: measured on
+Gemini's paid Flash-Lite rates, a fresh message costs roughly a tenth to a third of a US cent, and a
+claim answered from the cache costs almost nothing.
 
 ## Security notes
 

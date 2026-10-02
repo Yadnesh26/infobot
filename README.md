@@ -28,13 +28,14 @@ ffmpeg must be on the PATH for voice notes and videos. `scripts/check_demo.py` c
 
 A `Dockerfile`, a compose file with automatic HTTPS (Caddy), an AWS CloudFormation template and GitHub Actions workflows are in [deploy/](deploy/) and [.github/workflows/](.github/workflows/); [deploy/README.md](deploy/README.md) walks through putting it on an EC2 instance.
 
-## Project documentation
+## Layout
 
-- [CLAUDE.md](CLAUDE.md): rules and commands for anyone (or any coding agent) working on the repo
-- [docs/PROJECT_CONTEXT.md](docs/PROJECT_CONTEXT.md): how the system fits together
-- [docs/DECISIONS.md](docs/DECISIONS.md): why it is built the way it is
-- [docs/PROGRESS.md](docs/PROGRESS.md) and [docs/TASKS.md](docs/TASKS.md): what is done and what is next
-- [architecture-workflow.md](architecture-workflow.md) and [diagrams/](diagrams/): flow diagrams of every path through the bot
+- `app/`: the bot itself (webhook, message pipeline, providers, database access, prompts)
+- `tests/`: unit tests that need no keys and no network
+- `scripts/`: tools (pre-flight check, launcher, latency benchmark, live scenario runner)
+- `db/migrations/`: SQL for the database tables
+- `deploy/`, `.github/workflows/`, `Dockerfile`: deployment and CI
+- `site/`: the public landing, privacy and data-deletion pages
 
 ## License
 

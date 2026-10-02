@@ -12,3 +12,15 @@ app.env
 tests/scenarios/*.done
 logs/
 .claude/
+
+# Working notes, planning docs and example material: kept on the author's machine, not published.
+CLAUDE.md
+docs/
+whatsapp-verification-bot-implementation-plan.md
+architecture-workflow.md
+diagrams/
+diagrams.pdf
+reference-papers.md
+reference-papers.pdf
+claims_test/
+logo-options/
