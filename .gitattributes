@@ -1,0 +1,15 @@
+# Store and check out text with Unix line endings, so scripts run on Linux servers and in CI
+# (the deploy script is sent to an EC2 instance and bash fails on Windows line endings).
+* text=auto eol=lf
+
+# Windows batch files are the one exception: cmd.exe needs CRLF.
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# Never touch binaries.
+*.png binary
+*.jpg binary
+*.pdf binary
+*.mp3 binary
+*.mp4 binary
+*.ogg binary
