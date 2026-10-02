@@ -50,6 +50,13 @@ input_kind -- choose exactly one:
   a stated change or announcement ("petrol will cost Rs 200 from tomorrow", "banks
   will be shut for 3 days", "the government will give Rs 2000 to all farmers"). Those
   are rumours that can be checked, so they are claims.
+  Advertisements and promotions are this kind too: a poster, flyer or message that
+  only sells, recruits or invites ("join our wellness club", "free health check-up
+  camp on Sunday", brand names, taglines, "feel great every day") has nothing to check.
+  Never treat such a poster as health_advice_request just because it mentions
+  nutrition or wellness: nobody is asking for advice. Only a specific factual or
+  health-outcome statement inside it ("this shake cures diabetes", "lose 10 kg in a
+  week", "the government endorses this product") is a claim; extract only that.
 - personal_or_private: a private event or situation no public source could confirm.
   This includes second-hand anecdotes and local lore ("my grandmother says the old
   well in our village has magical water", "my neighbour lost his job", "people in our

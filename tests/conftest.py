@@ -98,3 +98,20 @@ def no_real_network(monkeypatch):
             pass
 
     monkeypatch.setattr("httpx.AsyncClient", _Blocked)
+
+
+@pytest.fixture(autouse=True)
+def offline_message_index(monkeypatch):
+    """The message index in memory: `store` maps key -> entry, so a test can see what was
+    remembered and a repeat message finds it."""
+    store: dict = {}
+
+    async def get(key):
+        return store.get(key)
+
+    async def put(entry):
+        store.setdefault(entry["msg_key"], entry)
+
+    monkeypatch.setattr("app.db.message_index.get", get)
+    monkeypatch.setattr("app.db.message_index.put", put)
+    return store

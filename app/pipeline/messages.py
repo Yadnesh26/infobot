@@ -267,3 +267,34 @@ GENERIC_ERROR = {
     "hi": "माफ़ कीजिए, इस मैसेज को सँभालते समय मुझसे कुछ गड़बड़ हो गई। कृपया फिर कोशिश करें।",
     "mr": "क्षमस्व, हा मेसेज हाताळताना माझ्याकडून काहीतरी चुकले. कृपया पुन्हा प्रयत्न करा.",
 }
+
+
+# The fixed reply for anything that needs a person's own medical situation. Static on purpose:
+# a model never writes or varies it. One complete version per language, never stacked together;
+# every version names the doctor/pharmacist and the 104 helpline.
+MEDICAL_STOP = {
+    "en": (
+        "This looks like it needs guidance specific to your own health situation — your age, medications, "
+        "or a condition that only a professional can safely judge. That's not something a general check "
+        "like this one should try to answer.\n\n"
+        "Please talk to a doctor or pharmacist directly. In India, you can also call the toll-free health "
+        "helpline 104 for guidance on where to go.\n\n"
+        "— InfoBot"
+    ),
+    "hi": (
+        "लगता है इसके लिए आपकी अपनी सेहत की स्थिति के हिसाब से सलाह चाहिए: आपकी उम्र, आप जो दवाइयाँ ले रहे हैं, "
+        "या कोई ऐसी स्थिति जिसे सिर्फ़ विशेषज्ञ ही सुरक्षित रूप से परख सकते हैं। इस तरह की सामान्य जाँच को "
+        "इसका जवाब देने की कोशिश नहीं करनी चाहिए।\n\n"
+        "कृपया सीधे किसी डॉक्टर या फार्मासिस्ट से बात करें। भारत में आप टोल-फ़्री स्वास्थ्य हेल्पलाइन 104 पर "
+        "भी कॉल कर सकते हैं, वे बता देंगे कि कहाँ जाना चाहिए।\n\n"
+        "— InfoBot"
+    ),
+    "mr": (
+        "यासाठी तुमच्या स्वतःच्या आरोग्याच्या स्थितीनुसार सल्ला हवा असे दिसते: तुमचे वय, तुम्ही घेत असलेली औषधे, "
+        "किंवा अशी स्थिती जी फक्त तज्ज्ञच सुरक्षितपणे ठरवू शकतात. अशा सर्वसाधारण तपासणीने यावर उत्तर "
+        "देण्याचा प्रयत्न करू नये.\n\n"
+        "कृपया थेट डॉक्टर किंवा फार्मासिस्टशी बोला. भारतात तुम्ही टोल-फ्री आरोग्य हेल्पलाइन 104 वर "
+        "देखील कॉल करू शकता, ते कुठे जायचे ते सांगतील.\n\n"
+        "— InfoBot"
+    ),
+}

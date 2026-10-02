@@ -1,9 +1,11 @@
 import asyncio
+import hashlib
 import logging
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 
 from app.config import settings
 from app.db import cache as db_cache
+from app.db import message_index
 from app.pipeline.classify import Claim, ClassifyResult, extract_and_classify
 from app.pipeline.compose import (
     ClaimOutcome,
@@ -26,6 +28,7 @@ class PipelineResult:
     reply_text: str
     cache_hit: str | None = None  # None | "exact" | "semantic" (all claims cached)
     pending_claim_writes: list[dict] = field(default_factory=list)
+    index_entry: dict | None = None  # the interpretation to remember (message_index), written after the send
     meta: dict = field(default_factory=dict)  # for logs and the scenario harness
 
     @property
@@ -60,7 +63,11 @@ async def _outcome_from_row(claim: Claim, row: dict, hit: str, target: str) -> C
     explanation = row.get("explanation_en") or ""
     local = explanation
     if target != "en" and explanation and row.get("verdict") != "refused":
-        local = (await translate_texts([explanation], target))[0]
+        # The headline is translated in the same call, so a Hindi reader is not shown the claim
+        # in the language the first asker used.
+        headline, local = await translate_texts([claim.claim_english, explanation], target)
+        if local != explanation:
+            claim = replace(claim, claim_original=headline)
     return ClaimOutcome(
         claim=claim,
         tier=row.get("tier") or claim.tier,
@@ -101,20 +108,22 @@ async def _verify_claim(claim: Claim, reply_lang: str | None = None) -> ClaimOut
 
 
 async def _resolve_claim(
-    claim: Claim, single: bool, text_hash: str, cacheable: bool, reply_lang: str | None = None
+    claim: Claim, single: bool, text_hash: str, cacheable: bool, reply_lang: str | None = None, skip_exact: bool | None = None
 ) -> ClaimOutcome:
     """Cache lookup, then verification, for one claim. For a one-claim message
     the claim is stored under the whole message's hash so an identical forward
     is answered before classification; for several claims each is keyed by its
     own English text."""
     claim_hash = text_hash if single else db_cache.hash_claim(claim.claim_english)
+    if skip_exact is None:
+        skip_exact = single  # a first-time single claim was just looked up by its message hash
     target = reply_lang or claim.language or "en"
 
     # The embedding (needed for the semantic lookup and for a cache write) is requested while
     # the exact lookup is still in flight. A single claim was already looked up by its message
-    # hash before classification, and missed, so that lookup is not repeated.
+    # hash before classification, and missed, so that lookup is not repeated (skip_exact).
     embed_task = asyncio.create_task(_embed(claim.claim_english))
-    row = None if single else await db_cache.lookup_exact(claim_hash)
+    row = None if skip_exact else await db_cache.lookup_exact(claim_hash)
     if row:
         embed_task.cancel()
         await db_cache.increment_seen(row["id"])
@@ -147,11 +156,67 @@ async def _resolve_claim(
     return outcome
 
 
+def media_key(kind: str, data: bytes) -> str:
+    """Identity of a picture/voice note/video: a hash of its bytes. Only the hash is stored."""
+    return f"{kind}:{hashlib.sha256(data).hexdigest()}"
+
+
+def _text_key(text_hash: str) -> str:
+    return f"text:{text_hash}"
+
+
+def _lang_key(key: str, reply_lang: str | None) -> str:
+    """One remembered reading per reply language: the note and friendly text inside a reading
+    are written in the language the user asked for, so Hindi must not be served the English one."""
+    return f"{key}|{reply_lang or '-'}"
+
+
+def _index_entry(key: str, classify: ClassifyResult, text_hash: str, reply_lang: str | None) -> dict:
+    return {"msg_key": _lang_key(key, reply_lang), "reply_lang": reply_lang, "interpretation": {**asdict(classify), "text_hash": text_hash}}
+
+
+def _classify_from_index(entry: dict, reply_lang: str | None) -> tuple[ClassifyResult, str] | None:
+    """The remembered reading, or None if it cannot be used (another reply language -- the
+    stored note and friendly text are written in the language they were asked for -- or an
+    entry this code version cannot read)."""
+    if entry.get("reply_lang") != reply_lang:
+        return None
+    try:
+        data = dict(entry["interpretation"])
+        text_hash = data.pop("text_hash")
+        data["claims"] = [Claim(**c) for c in data.get("claims", [])]
+        return ClassifyResult(**data), text_hash
+    except Exception:
+        logger.warning("Unreadable message_index entry %r", entry.get("msg_key"), exc_info=True)
+        return None
+
+
+async def answer_from_index(
+    key: str, frequently_forwarded: bool, reply_lang: str | None = None, entry: dict | None = None
+) -> PipelineResult | None:
+    """The same message (same picture, voice note, video or text) is answered from how it was
+    read the first time, so it can never be read two different ways. The claims themselves are
+    still looked up in the claims cache; None means "not seen before, do the full pipeline"."""
+    entry = entry or await message_index.get(_lang_key(key, reply_lang))
+    restored = _classify_from_index(entry, reply_lang) if entry else None
+    if not restored:
+        return None
+    classify, text_hash = restored
+    meta: dict = {
+        "reply_lang": reply_lang, "from_index": True, "input_kind": classify.input_kind,
+        "n_claims": len(classify.claims), "tiers": [c.tier for c in classify.claims],
+        "language": classify.detected_language,
+    }
+    return await _answer_classified(classify, text_hash, True, frequently_forwarded, reply_lang, meta, replay=True)
+
+
 async def run_text_pipeline(
-    raw_text: str, frequently_forwarded: bool, allow_cache: bool = True, reply_lang: str | None = None
+    raw_text: str, frequently_forwarded: bool, allow_cache: bool = True, reply_lang: str | None = None,
+    index_key: str | None = None,
 ) -> PipelineResult:
     """reply_lang is the user's chosen reply language (en/hi/mr) or None; when
-    None, each answer follows the language of the claim it answers."""
+    None, each answer follows the language of the claim it answers. index_key identifies the
+    original message when the text was derived from media, so how it was read is remembered."""
     text = normalize_text(raw_text)
 
     # The injection screen and the exact-cache lookup are independent, so they run together;
@@ -159,8 +224,10 @@ async def run_text_pipeline(
     # first, so the lookup is keyed on the same cleaned text.)
     cleaned = clean_text(text)[0][:MAX_INPUT_CHARS].strip()
     pre_hash = db_cache.hash_claim(cleaned) if cleaned else None
-    guard, exact = await asyncio.gather(
-        screen_text(text), db_cache.lookup_exact(pre_hash) if pre_hash else _none()
+    guard, exact, indexed = await asyncio.gather(
+        screen_text(text),
+        db_cache.lookup_exact(pre_hash) if pre_hash else _none(),
+        message_index.get(_lang_key(_text_key(pre_hash), reply_lang)) if pre_hash and index_key is None else _none(),
     )
     meta: dict = {"suspicious": guard.suspicious, "guard_score": round(guard.guard_score, 3), "reply_lang": reply_lang}
     if guard.blocked:
@@ -190,9 +257,14 @@ async def run_text_pipeline(
             if explanation == original[1]:
                 target = "en"  # translation failed: English text gets English labels, never a mix
             exact = {**exact, "claim_text_en": headline, "explanation_en": explanation}
-        else:
-            target = "en"
+        # (the medical hard stop is static text in every language, so it needs no translating)
         return PipelineResult(compose_cached_reply(exact, frequently_forwarded, target), cache_hit="exact", meta=meta)
+
+    if indexed and not guard.suspicious:
+        replayed = await answer_from_index(_text_key(pre_hash), frequently_forwarded, reply_lang, entry=indexed)
+        if replayed:
+            replayed.meta.update(suspicious=guard.suspicious, guard_score=meta["guard_score"])
+            return replayed
 
     classify: ClassifyResult = await extract_and_classify(text, frequently_forwarded, reply_lang)
     meta.update(
@@ -202,13 +274,23 @@ async def run_text_pipeline(
         language=classify.detected_language,
         model_reply=bool(classify.friendly_reply),
     )
+    result = await _answer_classified(classify, text_hash, cacheable, frequently_forwarded, reply_lang, meta)
+    # Remember how this message was read, so it is read the same way next time (see message_index).
+    if cacheable and (classify.input_kind == "claims" or index_key) and classify.input_kind != "unclear":
+        result.index_entry = _index_entry(index_key or _text_key(text_hash), classify, text_hash, reply_lang)
+    return result
 
+
+async def _answer_classified(
+    classify: ClassifyResult, text_hash: str, cacheable: bool, frequently_forwarded: bool,
+    reply_lang: str | None, meta: dict, replay: bool = False,
+) -> PipelineResult:
     if not classify.is_verifiable_claim:
         return PipelineResult(compose_nonclaim_reply(classify, reply_lang), meta=meta)
 
     single = len(classify.claims) == 1
     results = await asyncio.gather(
-        *[_resolve_claim(c, single, text_hash, cacheable, reply_lang) for c in classify.claims],
+        *[_resolve_claim(c, single, text_hash, cacheable, reply_lang, skip_exact=single and not replay) for c in classify.claims],
         return_exceptions=True,
     )
 

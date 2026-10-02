@@ -11,6 +11,7 @@ from app import http
 from app.config import settings
 from app.db import cache as db_cache
 from app.db import feedback as db_feedback
+from app.db import message_index as db_message_index
 from app.db import prefs as db_prefs
 from app.db import rate_limit as db_rate_limit
 from app.db import submissions as db_submissions
@@ -33,7 +34,7 @@ from app.pipeline.normalize import (
     normalize_audio,
     normalize_image,
 )
-from app.pipeline.orchestrator import PipelineResult, run_text_pipeline
+from app.pipeline.orchestrator import PipelineResult, answer_from_index, media_key, run_text_pipeline
 from app.providers.fallback_llm import FallbackError
 from app.providers.gemini import GeminiError
 from app.util import hash_phone, ref
@@ -192,6 +193,9 @@ async def handle_message(msg: InboundMessage) -> None:
             except Exception:
                 logger.exception("Cache write failed after successful send for wamid=%s", ref(msg.wamid))
 
+        if result.index_entry:
+            await db_message_index.put(result.index_entry)
+
         try:
             reply_wamid = send_result.get("messages", [{}])[0].get("id")
             if reply_wamid:
@@ -285,6 +289,12 @@ async def _compose_image_reply(msg: InboundMessage, reply_lang: str | None = Non
         logger.info("Rejecting oversized image (%d bytes) for wamid=%s", len(image_bytes), ref(msg.wamid))
         return PipelineResult(compose_unreadable_media("image", caption, reply_lang), meta={"input_kind": "too_large"})
 
+    # The same picture (and caption) must always be read, and so answered, the same way.
+    key = media_key("image", image_bytes + b"\x00" + caption.encode("utf-8"))
+    seen = await answer_from_index(key, msg.frequently_forwarded, reply_lang)
+    if seen:
+        return seen
+
     mime_type = msg.media_mime_type or "image/jpeg"
     try:
         reading = await normalize_image(image_bytes, mime_type, msg.caption)
@@ -311,7 +321,7 @@ async def _compose_image_reply(msg: InboundMessage, reply_lang: str | None = Non
             return PipelineResult(compose_unreadable_media("image", lang=reply_lang), meta={"input_kind": "unreadable"})
         return PipelineResult(compose_photo_only(reading.description, reply_lang), meta={"input_kind": "photo_only"})
 
-    return await run_text_pipeline(reading.text, msg.frequently_forwarded, reply_lang=reply_lang)
+    return await run_text_pipeline(reading.text, msg.frequently_forwarded, reply_lang=reply_lang, index_key=key)
 
 
 async def _compose_audio_or_video_reply(msg: InboundMessage, reply_lang: str | None = None) -> PipelineResult:
@@ -328,6 +338,11 @@ async def _compose_audio_or_video_reply(msg: InboundMessage, reply_lang: str | N
     if len(media_bytes) > MAX_AV_BYTES:
         logger.info("Rejecting oversized %s (%d bytes) for wamid=%s", msg.type, len(media_bytes), ref(msg.wamid))
         return PipelineResult(compose_too_long(msg.type, caption, reply_lang), meta={"input_kind": "too_large"})
+
+    key = media_key(msg.type, media_bytes + b"\x00" + caption.encode("utf-8"))
+    seen = await answer_from_index(key, msg.frequently_forwarded, reply_lang)
+    if seen:
+        return seen
 
     try:
         if msg.type == "video":
@@ -356,7 +371,8 @@ async def _compose_audio_or_video_reply(msg: InboundMessage, reply_lang: str | N
         return PipelineResult(compose_unreadable_media(msg.type, lang=reply_lang), meta={"input_kind": "no_speech"})
 
     return await run_text_pipeline(
-        label_transcript(transcript, msg.type, msg.caption), msg.frequently_forwarded, reply_lang=reply_lang
+        label_transcript(transcript, msg.type, msg.caption), msg.frequently_forwarded, reply_lang=reply_lang,
+        index_key=key,
     )
 
 

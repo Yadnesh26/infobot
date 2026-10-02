@@ -1,6 +1,5 @@
 import re
 from dataclasses import dataclass, field
-from pathlib import Path
 
 from app.pipeline import messages
 from app.pipeline.classify import Claim, ClassifyResult
@@ -8,12 +7,6 @@ from app.pipeline.confidence import confidence_label
 from app.pipeline.guard import guess_language, sanitize_output
 from app.pipeline.messages import pick, verdict_label
 from app.pipeline.verify import T3aResult, VerifyResult
-
-# This is the literal reply text, not an LLM prompt -- T3b is a hard stop that
-# must never involve model-generated content. Kept as a text file anyway,
-# matching every other message in prompts/, since it's exactly the kind of
-# text a team would want to review or localize without touching code.
-_T3B_MESSAGE = (Path(__file__).parent.parent / "prompts" / "refuse_t3b.txt").read_text(encoding="utf-8").strip()
 
 WHATSAPP_TEXT_LIMIT = 4096
 _SAFE_LIMIT = 3900
@@ -38,12 +31,11 @@ class ClaimOutcome:
     local_lang: str = ""  # the language explanation_local is actually in ("" = use the claim's)
 
 
-def compose_t3b_reply() -> str:
-    """The hard stop. Static and parameter-free on purpose -- same message every
-    time, regardless of claim text, language, or forward count. The one path in
-    this whole system that must never vary or be generated.
-    """
-    return _T3B_MESSAGE
+def compose_t3b_reply(lang: str | None = None) -> str:
+    """The hard stop. Static on purpose: a fixed text per language (messages.MEDICAL_STOP), the
+    same every time for a given language, regardless of the claim text or forward count. Never
+    model-generated. One language at a time: the user's own, else English."""
+    return pick(messages.MEDICAL_STOP, lang)
 
 
 # --------------------------------------------------------------------------
@@ -175,7 +167,7 @@ def compose_cached_reply(row: dict, frequently_forwarded: bool, lang: str = "en"
     verdict = row.get("verdict", "")
     headline = _short(_plain(row.get("claim_text_en") or ""), 160)
     if verdict == "refused":
-        return compose_t3b_reply()
+        return compose_t3b_reply(lang)
     if verdict == "guidance":
         return _guidance_card(row.get("explanation_en") or "", frequently_forwarded, lang, headline)
     sources = row.get("sources") or []
@@ -239,7 +231,7 @@ def compose_claims_reply(
         o = outcomes[0]
         lang = _outcome_lang(o, reply_lang)
         if o.verdict == "refused":
-            return compose_t3b_reply()
+            return compose_t3b_reply(lang)
         if o.verdict == "error":
             return pick(messages.BUSY, lang)
         headline = _headline(o.claim)
@@ -307,7 +299,7 @@ def compose_nonclaim_reply(classify: ClassifyResult, reply_lang: str | None = No
     lang = reply_lang or classify.detected_language
     kind = classify.input_kind
     if kind == "health_advice_request":
-        return compose_t3b_reply()
+        return compose_t3b_reply(lang)
     if kind == "media_authenticity":
         return pick(messages.MEDIA_AUTHENTICITY, lang)
     if kind == "abusive_or_manipulation":

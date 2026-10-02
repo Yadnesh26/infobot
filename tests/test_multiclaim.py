@@ -19,7 +19,7 @@ def _classify_json(claims, kind="claims", lang="en", **extra):
 
 def _stub_cache(monkeypatch, exact=None, semantic=None, seen=None):
     """exact/semantic map a lookup key -> cached row; anything else is a miss."""
-    exact = exact or {}
+    exact = {} if exact is None else exact
 
     async def lookup_exact(h):
         return exact.get(h)
